@@ -313,8 +313,6 @@ This is normal for a local app. Click "Advanced" → "Go to scikick (unsafe)" to
 
 ## Support
 
-## Support
-
 If scikick saves you time on your research, [buy me a coffee on Ko-fi](https://ko-fi.com/scikick) ☕. It helps cover development time and keeps the tool free for everyone.
 
 ## License
