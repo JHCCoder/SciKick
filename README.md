@@ -44,7 +44,7 @@ Chrome Extension (side panel) ↔ Local Server (localhost:8742) ↔ Google Drive
 ### 1. Run the setup wizard
 
 ```bash
-cd scientific-paper-assistant
+cd scikick
 ./start.sh --setup
 ```
 
@@ -171,7 +171,7 @@ Each person needs their own setup — scikick runs locally and uses personal API
 
 ### For a labmate setting up from scratch
 
-1. **Get the code**: Clone or copy the `scientific-paper-assistant/` folder
+1. **Get the code**: Clone or copy the `scikick/` folder
 2. **Get an LLM API key**: Sign up at [DeepSeek](https://platform.deepseek.com/) (or Anthropic, OpenAI, etc.)
 3. **Run the setup wizard**: `./start.sh --setup` — it guides you through Google Cloud setup and LLM config
 4. **Start the server**: `./start.sh`

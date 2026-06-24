@@ -1090,7 +1090,7 @@ async function init() {
   // chrome.runtime.getURL() returns an internal chrome-extension:// URL,
   // not a filesystem path, so we can't derive the real project directory.
   // The user should run this from the project root.
-  const startCmd = `cd scientific-paper-assistant && ./start.sh`;
+  const startCmd = `cd scikick && ./start.sh`;
   dom.cmdText.textContent = startCmd;
 
   // Wire up the copy button
