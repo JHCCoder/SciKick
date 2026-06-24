@@ -15,6 +15,48 @@
   --radius: 8px;
   --font-mono: 'SF Mono', 'Menlo', 'Monaco', monospace;
   --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+
+  /* Settings panel (warm amber) */
+  --settings-bg: #2d2416;
+  --settings-border: #8b6914;
+  --settings-header-bg: #3d2e1a;
+  --settings-label: #c4a46c;
+  --settings-input-border: #5c4510;
+  --settings-hint: #8b7355;
+
+  /* Info panel (purple) */
+  --info-bg: #1d162d;
+  --info-border: #6a3d8a;
+  --info-header-bg: #271a3d;
+  --info-section-title: #b57edc;
+}
+
+/* --- Light Theme --- */
+html.light-theme {
+  --bg-primary: #f5f5f7;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #e8e8ed;
+  --text-primary: #1a1a2e;
+  --text-secondary: #6e6e80;
+  --accent: #2d9d7a;
+  --accent-hover: #237b60;
+  --danger: #d94053;
+  --warning: #d98a30;
+  --border: #d1d1d6;
+
+  /* Settings panel (light amber) */
+  --settings-bg: #fdf6e8;
+  --settings-border: #d4a843;
+  --settings-header-bg: #f5e6c8;
+  --settings-label: #8b6914;
+  --settings-input-border: #d4a843;
+  --settings-hint: #9c8b6e;
+
+  /* Info panel (light purple) */
+  --info-bg: #f5f0fa;
+  --info-border: #9b7ec4;
+  --info-header-bg: #ede0f5;
+  --info-section-title: #6a3d8a;
 }
 
 html, body {
@@ -96,6 +138,18 @@ body {
   padding: 5px 8px;
 }
 
+#topbar #btn-theme {
+  font-size: 11px;
+  padding: 3px 4px;
+  /* Force emoji to use text color — they normally ignore CSS color */
+  color: transparent;
+  text-shadow: 0 0 0 var(--text-secondary);
+}
+#topbar #btn-theme:hover {
+  color: transparent;
+  text-shadow: 0 0 0 var(--text-primary);
+}
+
 /* --- Banners --- */
 .banner {
   padding: 12px;
@@ -154,8 +208,8 @@ body {
 /* --- Settings Panel (warm orange theme) --- */
 #settings-panel {
   margin: 0 8px 8px;
-  background: #2d2416;
-  border: 1px solid #8b6914;
+  background: var(--settings-bg);
+  border: 1px solid var(--settings-border);
   border-radius: var(--radius);
   overflow: hidden;
   flex-shrink: 0;
@@ -165,7 +219,7 @@ body {
   justify-content: space-between;
   align-items: center;
   padding: 8px 12px;
-  background: #3d2e1a;
+  background: var(--settings-header-bg);
 }
 .settings-header h3 {
   font-size: 13px;
@@ -188,7 +242,7 @@ body {
 .settings-body label {
   display: block;
   font-size: 11px;
-  color: #c4a46c;
+  color: var(--settings-label);
   margin: 8px 0 4px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -198,7 +252,7 @@ body {
   width: 100%;
   padding: 6px 8px;
   background: var(--bg-primary);
-  border: 1px solid #5c4510;
+  border: 1px solid var(--settings-input-border);
   border-radius: 4px;
   color: var(--text-primary);
   font-size: 13px;
@@ -224,10 +278,218 @@ body {
 }
 .settings-body .hint {
   font-size: 11px;
-  color: #8b7355;
+  color: var(--settings-hint);
   margin-top: 8px;
 }
 .hidden { display: none !important; }
+
+/* --- Info Panel (purple theme) --- */
+#info-panel {
+  margin: 0 8px 8px;
+  background: var(--info-bg);
+  border: 1px solid var(--info-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.info-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: var(--info-header-bg);
+}
+.info-header h3 {
+  font-size: 13px;
+  margin: 0;
+  color: var(--text-primary);
+}
+.info-header button {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 14px;
+}
+.info-header button:hover {
+  color: var(--text-primary);
+}
+.info-body {
+  padding: 10px 12px;
+  font-size: 12px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.info-empty {
+  color: var(--text-secondary);
+  font-style: italic;
+  text-align: center;
+  padding: 12px 0;
+}
+.info-section {
+  margin-bottom: 10px;
+}
+.info-section:last-child {
+  margin-bottom: 0;
+}
+.info-section-title {
+  font-size: 10px;
+  color: var(--info-section-title);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+  font-weight: 600;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.info-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 2px 0;
+  color: var(--text-primary);
+  gap: 8px;
+}
+.info-row .info-label {
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.info-row .info-value {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.info-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+.info-tag {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.info-tag.severity-critical { background: rgba(224, 85, 106, 0.2); color: var(--danger); }
+.info-tag.severity-major    { background: rgba(240, 160, 80, 0.2); color: var(--warning); }
+.info-tag.severity-minor    { background: rgba(160, 160, 176, 0.2); color: var(--text-secondary); }
+.info-tag.section           { background: rgba(181, 126, 220, 0.15); color: var(--info-section-title); }
+.info-tag.count             { background: rgba(79, 195, 161, 0.15); color: var(--accent); }
+.info-divider {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 8px 0;
+}
+
+/* --- Info Panel: Expandable File Tree --- */
+.tree-root {
+  margin-top: 4px;
+}
+.tree-node {
+  margin: 0;
+  padding: 0;
+  font-size: 11px;
+  user-select: none;
+}
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 0;
+  cursor: pointer;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.tree-row:hover {
+  background: rgba(181, 126, 220, 0.08);
+}
+.tree-toggle {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8px;
+  color: var(--text-secondary);
+  transition: transform 0.15s ease;
+  cursor: pointer;
+}
+.tree-toggle.expanded {
+  transform: rotate(90deg);
+}
+.tree-toggle.empty {
+  visibility: hidden;
+}
+.tree-icon {
+  flex-shrink: 0;
+  font-size: 12px;
+  width: 16px;
+  text-align: center;
+}
+.tree-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+}
+.tree-size {
+  flex-shrink: 0;
+  font-size: 9px;
+  color: var(--text-secondary);
+}
+.tree-count {
+  flex-shrink: 0;
+  font-size: 9px;
+  color: var(--text-secondary);
+  padding: 1px 5px;
+  background: rgba(79, 195, 161, 0.1);
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.tree-file .tree-row {
+  cursor: default;
+}
+.tree-file .tree-name:hover {
+  color: var(--accent);
+}
+.tree-children {
+  display: none;
+}
+.tree-children.expanded {
+  display: block;
+}
+
+/* --- Info Panel: Delete / Unload buttons --- */
+.info-delete {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+.info-delete:hover {
+  color: var(--danger);
+  background: rgba(224, 85, 106, 0.12);
+}
+.info-section-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
 
 /* --- Context Window Bar --- */
 #context-usage-bar {

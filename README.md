@@ -10,6 +10,18 @@ An AI research companion — Chrome extension + local server. Brainstorm ideas, 
 - **Runs locally** — No hosting costs, your data stays on your machine
 - **Streaming responses** — Real-time AI chat with streaming
 
+## Side Panel Overview
+
+The top bar has five buttons (left to right):
+
+| Button | Name | What it does |
+|--------|------|--------------|
+| **ℹ** | Info | View loaded data — project file tree, scraped articles, session state, memory stats. You can delete individual scraped articles or unload the entire project from here. |
+| **—** | Clear Chat | Wipes the chat history shown on screen. Your project context and session memory are unaffected — the AI still remembers everything. |
+| **🌙** | Theme | Toggle between dark theme (default) and light theme. Your preference is saved and persists across restarts. |
+| **⚙** | Settings | Configure your LLM provider, API key, model, and custom base URL. Changes take effect immediately and are saved for the next restart. |
+| **⟳** | Restart | Restarts your session — wipes the chat and re-shows the onboarding options ("What would you like to work on today?"). Server state is cleared but project files stay loaded. |
+
 ## Architecture
 
 ```

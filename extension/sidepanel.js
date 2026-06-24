@@ -44,6 +44,7 @@ const dom = {
   contextHint: $("#context-hint"),
   chatInput: $("#chat-input"),
   btnSend: $("#btn-send"),
+  btnTheme: $("#btn-theme"),
   btnClear: $("#btn-clear"),
   btnPower: $("#btn-power"),
   btnConnect: $("#btn-connect"),
@@ -60,6 +61,11 @@ const dom = {
   cfgBaseUrl: $("#cfg-base-url"),
   cfgBaseUrlLabel: $("#cfg-base-url-label"),
   cfgStatus: $("#cfg-status"),
+  // Info panel
+  btnInfo: $("#btn-info"),
+  infoPanel: $("#info-panel"),
+  btnInfoClose: $("#btn-info-close"),
+  infoBody: $("#info-body"),
   // Context window
   ctxBar: $("#context-usage-bar"),
   ctxFill: $("#ctx-fill-bar"),
@@ -103,6 +109,7 @@ function setServerStatus(status) {
   // is busy, not down.
   if (status === "disconnected" && loadingInProgress) return;
 
+  const wasConnected = serverConnected;
   serverConnected = status === "connected";
   dom.statusDot.className = `status-${status}`;
   dom.statusDot.title = `Server: ${status}`;
@@ -114,12 +121,30 @@ function setServerStatus(status) {
     // Enable chat regardless of whether a project is loaded
     dom.chatInput.disabled = false;
     dom.btnSend.disabled = false;
+
+    // Server just came back — in-memory state was wiped on restart.
+    // Reset client-side project state and refresh the info panel.
+    if (!wasConnected) {
+      projectLoaded = false;
+      projectFiles = [];
+      projectFolderId = null;
+      viewingFile = null;
+      dom.projectName.textContent = "scikick";
+      if (!dom.infoPanel.classList.contains("hidden")) {
+        loadInfoPanel();
+      }
+    }
   } else {
     dom.connectBanner.style.display = "block";
     dom.driveInput.disabled = true;
     dom.btnLoad.disabled = true;
     dom.chatInput.disabled = true;
     dom.btnSend.disabled = true;
+
+    // Server went down — update info panel if open
+    if (!dom.infoPanel.classList.contains("hidden")) {
+      dom.infoBody.innerHTML = '<div class="info-empty">Server disconnected. Data will reload when reconnected.</div>';
+    }
   }
 }
 
@@ -422,6 +447,9 @@ async function loadProject() {
     // Show onboarding focus options
     if (!sessionFocus) showOnboardingOptions();
 
+    // Refresh info panel if open
+    if (!dom.infoPanel.classList.contains("hidden")) loadInfoPanel();
+
   } catch (e) {
     showSystemMessage(`❌ **Error loading project:** ${e.message}`);
   } finally {
@@ -525,6 +553,9 @@ async function sendMessage() {
 
     // Refresh context usage
     updateContextUsage();
+
+    // Refresh info panel if open
+    if (!dom.infoPanel.classList.contains("hidden")) loadInfoPanel();
 
   } catch (e) {
     if (e.name !== "AbortError") {
@@ -751,22 +782,34 @@ dom.btnClear.addEventListener("click", () => {
 
 dom.btnConnect.addEventListener("click", connect);
 
-// Restart session — wipe chat, scraped content, and re-show onboarding
+// Restart session — wipe server state, chat, and re-show onboarding
 dom.btnPower.addEventListener("click", async () => {
   dom.btnPower.classList.add("spinning");
 
-  // Clear scraped papers on the server
   if (serverConnected) {
     try {
-      await fetch(`${SERVER_URL}/chat/scraped`, { method: "DELETE" });
+      await fetch(`${SERVER_URL}/chat/reset`, { method: "POST" });
     } catch (e) { /* ignore */ }
   }
+
+  // Reset all client-side project state
+  projectLoaded = false;
+  projectFiles = [];
+  projectFolderId = null;
+  viewingFile = null;
+  dom.projectName.textContent = "scikick";
 
   // Wipe chat
   dom.messages.innerHTML = "";
 
   // Reset session focus so onboarding options reappear
   sessionFocus = null;
+
+  // Refresh the info panel if open
+  if (!dom.infoPanel.classList.contains("hidden")) loadInfoPanel();
+
+  // Refresh context usage (will show near-empty since memory is gone)
+  if (serverConnected) updateContextUsage();
 
   // Show the "What would you like to work on today?" options
   showOnboardingOptions();
@@ -776,9 +819,122 @@ dom.btnPower.addEventListener("click", async () => {
 
 // Settings panel
 dom.btnSettings.addEventListener("click", openSettings);
-dom.btnSettingsClose.addEventListener("click", closeSettings);
+if (dom.btnSettingsClose) dom.btnSettingsClose.addEventListener("click", closeSettings);
 dom.btnSettingsSave.addEventListener("click", saveSettings);
 dom.cfgProvider.addEventListener("change", handleProviderChange);
+
+// Info panel
+dom.btnInfo.addEventListener("click", toggleInfoPanel);
+if (dom.btnInfoClose) dom.btnInfoClose.addEventListener("click", closeInfoPanel);
+
+async function toggleInfoPanel() {
+  if (!dom.infoPanel.classList.contains("hidden")) {
+    closeInfoPanel();
+    return;
+  }
+  dom.infoPanel.classList.remove("hidden");
+  await loadInfoPanel();
+}
+
+function closeInfoPanel() {
+  dom.infoPanel.classList.add("hidden");
+}
+
+async function loadInfoPanel() {
+  // Fetch data from all relevant endpoints in parallel
+  const [ctxRes, memRes] = await Promise.all([
+    fetch(`${SERVER_URL}/chat/context`).then(r => r.ok ? r.json() : null).catch(() => null),
+    fetch(`${SERVER_URL}/memory/status`).then(r => r.ok ? r.json() : null).catch(() => null),
+  ]);
+
+  if (!ctxRes && !memRes) {
+    dom.infoBody.innerHTML = '<div class="info-empty">Could not fetch data. Is the server running?</div>';
+    return;
+  }
+
+  let html = "";
+
+  // --- Scraped Articles ---
+  if (ctxRes && ctxRes.scraped_papers && ctxRes.scraped_papers.length > 0) {
+    html += '<hr class="info-divider">';
+    html += '<div class="info-section">';
+    html += '<div class="info-section-title">🌐 Scraped Articles</div>';
+    html += `<div class="info-row"><span class="info-label">Count</span><span class="info-value">${ctxRes.scraped_papers.length}</span></div>`;
+    ctxRes.scraped_papers.forEach((sp, i) => {
+      html += `<div class="info-row"><span class="info-label">#${i + 1}</span><span class="info-value">${escHtml(sp.title || "Untitled")}</span><button class="info-delete info-delete-scrape" data-index="${i}" title="Remove this article">✕</button></div>`;
+      html += `<div class="info-row"><span class="info-label">Size</span><span class="info-value">${formatSize(sp.full_text_length || 0)}</span></div>`;
+    });
+    html += '</div>';
+  }
+
+  // --- Project Data (file tree) ---
+  if (projectFiles && projectFiles.length > 0) {
+    const tree = buildFileTree(projectFiles);
+    if (tree) {
+      html += '<hr class="info-divider">';
+      html += '<div class="info-section">';
+      html += '<div class="info-section-title"><span>📁 Project Data</span><button class="info-delete info-unload-project" title="Unload project (keeps scraped articles)">✕ Unload</button></div>';
+      html += `<div class="info-row"><span class="info-label">Total files</span><span class="info-value">${projectFiles.length}</span></div>`;
+      html += `<div class="info-row"><span class="info-label">Papers</span><span class="info-value">${tree.paperCount}</span></div>`;
+      html += `<div class="info-row"><span class="info-label">Sheets</span><span class="info-value">${tree.sheetCount}</span></div>`;
+      html += '<div class="tree-root">';
+      html += renderFileTree(tree, 0);
+      html += '</div>';
+      html += '</div>';
+    }
+  }
+
+  // --- Session / Memory ---
+  if (memRes && memRes.active) {
+    const m = memRes.memory;
+    html += '<hr class="info-divider">';
+    html += '<div class="info-section">';
+    html += '<div class="info-section-title">💾 Session</div>';
+    if (m.project_folder_name) {
+      html += `<div class="info-row"><span class="info-label">Project</span><span class="info-value">${escHtml(m.project_folder_name)}</span></div>`;
+    }
+    if (m.last_updated) {
+      html += `<div class="info-row"><span class="info-label">Last active</span><span class="info-value">${new Date(m.last_updated).toLocaleString()}</span></div>`;
+    }
+    if (m.last_computer) {
+      html += `<div class="info-row"><span class="info-label">Computer</span><span class="info-value">${escHtml(m.last_computer)}</span></div>`;
+    }
+    if (m.chat_history) {
+      html += `<div class="info-row"><span class="info-label">Chat turns</span><span class="info-value">${Math.floor(m.chat_history.length / 2)}</span></div>`;
+    }
+    if (m.decisions) {
+      html += `<div class="info-row"><span class="info-label">Decisions</span><span class="info-value">${m.decisions.length}</span></div>`;
+    }
+    html += '</div>';
+  }
+
+  // --- Nothing loaded ---
+  if (!html) {
+    html = '<div class="info-empty">No data loaded. Load a project or scrape a paper to see details here.</div>';
+  }
+
+  dom.infoBody.innerHTML = html;
+}
+
+// Theme toggle
+dom.btnTheme.addEventListener("click", toggleTheme);
+
+async function toggleTheme() {
+  const html = document.documentElement;
+  const isLight = html.classList.toggle("light-theme");
+  dom.btnTheme.textContent = isLight ? "☀️" : "🌙";
+  dom.btnTheme.title = isLight ? "Switch to dark theme" : "Switch to light theme";
+  await chrome.storage.local.set({ theme: isLight ? "light" : "dark" });
+}
+
+async function loadTheme() {
+  const stored = await chrome.storage.local.get(["theme"]);
+  if (stored.theme === "light") {
+    document.documentElement.classList.add("light-theme");
+    dom.btnTheme.textContent = "☀️";
+    dom.btnTheme.title = "Switch to dark theme";
+  }
+}
 
 // Context refresh
 dom.btnRefreshCtx.addEventListener("click", refreshContext);
@@ -829,6 +985,175 @@ function formatSize(bytes) {
   const units = ["B", "KB", "MB", "GB"];
   const i = Math.floor(Math.log(bytes) / Math.log(1024));
   return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
+}
+
+function escHtml(text) {
+  if (!text) return "";
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// ---------------------------------------------------------------------------
+// File Tree Helpers (for info panel)
+// ---------------------------------------------------------------------------
+
+function isFilePaper(file) {
+  const paperMimes = [
+    "application/pdf",
+    "application/vnd.google-apps.document",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ];
+  if (paperMimes.includes(file.mimeType)) return true;
+  const lower = file.name.toLowerCase();
+  return lower.endsWith(".pdf") || lower.endsWith(".docx");
+}
+
+function isFileSheet(file) {
+  const sheetMimes = [
+    "application/vnd.google-apps.spreadsheet",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ];
+  if (sheetMimes.includes(file.mimeType)) return true;
+  const lower = file.name.toLowerCase();
+  return lower.endsWith(".xlsx") || lower.endsWith(".xls") || lower.endsWith(".csv");
+}
+
+function buildFileTree(projectFiles) {
+  if (!projectFiles || projectFiles.length === 0) return null;
+
+  const root = {
+    name: "root",
+    path: "",
+    files: [],
+    subdirs: {},
+    paperCount: 0,
+    sheetCount: 0,
+    dirCount: 0,
+    isLeaf: false,
+  };
+
+  for (const file of projectFiles) {
+    const parts = file.name.split("/");
+    let current = root;
+    for (let i = 0; i < parts.length; i++) {
+      if (i === parts.length - 1) {
+        current.files.push({
+          name: parts[i],
+          id: file.id,
+          mimeType: file.mimeType,
+          size: file.size,
+          modifiedTime: file.modifiedTime,
+          isLeaf: true,
+          isPaper: isFilePaper(file),
+          isSheet: isFileSheet(file),
+        });
+      } else {
+        const dirName = parts[i];
+        if (!current.subdirs[dirName]) {
+          const dirPath = parts.slice(0, i + 1).join("/");
+          current.subdirs[dirName] = {
+            name: dirName,
+            path: dirPath,
+            files: [],
+            subdirs: {},
+            paperCount: 0,
+            sheetCount: 0,
+            dirCount: 0,
+            isLeaf: false,
+          };
+        }
+        current.dirCount = Object.keys(current.subdirs).length;
+        current = current.subdirs[dirName];
+      }
+    }
+  }
+
+  computeFileCounts(root);
+  return root;
+}
+
+function computeFileCounts(node) {
+  if (node.isLeaf) return { papers: node.isPaper ? 1 : 0, sheets: node.isSheet ? 1 : 0 };
+
+  let papers = 0, sheets = 0;
+  for (const f of node.files) {
+    if (f.isPaper) papers++;
+    if (f.isSheet) sheets++;
+  }
+  node.dirCount = Object.keys(node.subdirs).length;
+  for (const sub of Object.values(node.subdirs)) {
+    const subCounts = computeFileCounts(sub);
+    papers += subCounts.papers;
+    sheets += subCounts.sheets;
+  }
+  node.paperCount = papers;
+  node.sheetCount = sheets;
+  return { papers, sheets };
+}
+
+function renderFileTree(node, depth) {
+  if (node.isLeaf) {
+    let icon = "📎";
+    if (node.isPaper) icon = "📄";
+    else if (node.isSheet) icon = "📊";
+
+    return (
+      `<div class="tree-row" style="padding-left:${depth * 14 + 18}px">` +
+      `<span class="tree-icon">${icon}</span>` +
+      `<span class="tree-name" title="${escHtml(node.name)}">${escHtml(node.name)}</span>` +
+      `<span class="tree-size">${formatSize(node.size)}</span>` +
+      `</div>`
+    );
+  }
+
+  const hasChildren = node.files.length > 0 || Object.keys(node.subdirs).length > 0;
+  const expanded = depth === 0;
+
+  const toggleHtml = hasChildren
+    ? `<span class="tree-toggle${expanded ? " expanded" : ""}" data-path="${escHtml(node.path)}">▶</span>`
+    : `<span class="tree-toggle empty">▶</span>`;
+
+  const nameHtml = depth === 0
+    ? `<span class="tree-name" style="font-weight:600">Project Root</span>`
+    : `<span class="tree-name">${escHtml(node.name)}</span>`;
+
+  let countHtml = "";
+  if (hasChildren) {
+    const parts = [];
+    if (node.paperCount > 0) parts.push(`${node.paperCount}p`);
+    if (node.sheetCount > 0) parts.push(`${node.sheetCount}s`);
+    if (node.dirCount > 0) parts.push(`${node.dirCount}d`);
+    if (parts.length > 0) {
+      countHtml = `<span class="tree-count">${parts.join(" ")}</span>`;
+    }
+  }
+
+  let html = "";
+  html += `<div class="tree-node">`;
+  html += `<div class="tree-row" style="padding-left:${depth * 14 + 4}px">`;
+  html += toggleHtml;
+  html += `<span class="tree-icon">📁</span>`;
+  html += nameHtml;
+  html += countHtml;
+  html += `</div>`;
+
+  html += `<div class="tree-children${expanded ? " expanded" : ""}" data-children="${escHtml(node.path)}">`;
+
+  const dirNames = Object.keys(node.subdirs).sort((a, b) => a.localeCompare(b));
+  for (const dirName of dirNames) {
+    html += renderFileTree(node.subdirs[dirName], depth + 1);
+  }
+  node.files.sort((a, b) => a.name.localeCompare(b.name));
+  for (const f of node.files) {
+    html += `<div class="tree-node tree-file">`;
+    html += renderFileTree(f, depth + 1);
+    html += `</div>`;
+  }
+
+  html += `</div>`;
+  html += `</div>`;
+  return html;
 }
 
 // ---------------------------------------------------------------------------
@@ -1067,6 +1392,9 @@ function initTabBar() {
         dom.projectName.textContent = data.title || "Scraped Paper";
         updateContextUsage();
 
+        // Refresh info panel if open
+        if (!dom.infoPanel.classList.contains("hidden")) loadInfoPanel();
+
       } catch (e) {
         showSystemMessage(`❌ **Scrape failed:** ${e.message}\n\nTry loading the paper via Google Drive instead.`);
       } finally {
@@ -1102,10 +1430,13 @@ async function init() {
   });
 
   // Load saved settings
-  const stored = await chrome.storage.local.get(["driveFolderId"]);
+  const stored = await chrome.storage.local.get(["driveFolderId", "theme"]);
   if (stored.driveFolderId) {
     dom.driveInput.value = stored.driveFolderId;
   }
+
+  // Apply saved theme (before first paint — but we're already in init)
+  loadTheme();
 
   // Open a port to the background worker.
   // The worker pushes tab changes via this port (proactive updates).
@@ -1136,6 +1467,56 @@ async function init() {
 
   // Connect to server
   await connect();
+
+  // Delegated click handler for info panel: tree toggles, delete, unload
+  if (dom.infoBody) {
+    dom.infoBody.addEventListener("click", async (e) => {
+      // --- Tree toggle ---
+      const toggle = e.target.closest(".tree-toggle");
+      if (toggle && !toggle.classList.contains("empty")) {
+        const path = toggle.dataset.path;
+        if (path != null) {
+          const children = dom.infoBody.querySelector(`[data-children="${CSS.escape(path)}"]`);
+          if (children) {
+            if (children.classList.contains("expanded")) {
+              children.classList.remove("expanded");
+              toggle.classList.remove("expanded");
+            } else {
+              children.classList.add("expanded");
+              toggle.classList.add("expanded");
+            }
+          }
+        }
+      }
+
+      // --- Delete scraped article ---
+      const delBtn = e.target.closest(".info-delete-scrape");
+      if (delBtn) {
+        const idx = delBtn.dataset.index;
+        if (idx != null) {
+          try {
+            await fetch(`${SERVER_URL}/chat/scraped?index=${idx}`, { method: "DELETE" });
+          } catch (err) { /* ignore */ }
+          loadInfoPanel();
+        }
+      }
+
+      // --- Unload project ---
+      if (e.target.closest(".info-unload-project")) {
+        if (serverConnected) {
+          try {
+            await fetch(`${SERVER_URL}/chat/unload-project`, { method: "POST" });
+          } catch (err) { /* ignore */ }
+        }
+        projectLoaded = false;
+        projectFiles = [];
+        projectFolderId = null;
+        viewingFile = null;
+        dom.projectName.textContent = "scikick";
+        loadInfoPanel();
+      }
+    });
+  }
 
   // Poll health
   setInterval(checkServerHealth, POLL_INTERVAL_MS);

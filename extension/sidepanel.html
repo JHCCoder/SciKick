@@ -11,8 +11,10 @@
   <header id="topbar">
     <div id="status-dot" class="status-disconnected" title="Server status"></div>
     <h1 id="project-name">scikick</h1>
-    <button id="btn-settings" title="LLM Settings">⚙</button>
+    <button id="btn-info" title="Loaded data">ℹ</button>
     <button id="btn-clear" title="Clear chat">—</button>
+    <button id="btn-theme" title="Toggle theme">🌙</button>
+    <button id="btn-settings" title="LLM Settings">⚙</button>
     <button id="btn-power" title="Restart session">⟳</button>
   </header>
 
@@ -27,6 +29,7 @@
       <select id="cfg-provider">
         <option value="anthropic">Anthropic (Claude)</option>
         <option value="deepseek">DeepSeek</option>
+        <option value="glm">Zhipu AI (GLM)</option>
         <option value="openai">OpenAI (GPT-4o)</option>
         <option value="custom">Custom (OpenAI-compatible)</option>
       </select>
@@ -45,6 +48,17 @@
         <span id="cfg-status"></span>
       </div>
       <p class="hint">Changes take effect immediately and are saved for next restart.</p>
+    </div>
+  </div>
+
+  <!-- Info Panel (hidden by default) -->
+  <div id="info-panel" class="hidden">
+    <div class="info-header">
+      <h3>📦 Loaded Data</h3>
+      <button id="btn-info-close" title="Close">✕</button>
+    </div>
+    <div class="info-body" id="info-body">
+      <div class="info-empty">No data loaded. Load a project or scrape a paper to see details here.</div>
     </div>
   </div>
 
@@ -88,6 +102,14 @@
             <li>Discuss and refine your scientific writing</li>
             <li>Analyze data, figures, and results</li>
             <li>Navigate and respond to peer review</li>
+          </ul>
+          <p><strong>Top bar buttons</strong> (left to right):</p>
+          <ul>
+            <li><strong>ℹ</strong> — View loaded data: project files, scraped articles, session info</li>
+            <li><strong>—</strong> — Clear the chat (your project context stays intact)</li>
+            <li><strong>🌙</strong> — Toggle between dark and light theme</li>
+            <li><strong>⚙</strong> — Configure your LLM provider, API key, and model</li>
+            <li><strong>⟳</strong> — Restart your session (wipes chat, re-shows onboarding)</li>
           </ul>
           <p>You can start chatting right away, or paste a Google Drive folder ID above and click <strong>Load Project</strong> to work with your paper and reviewer comments.</p>
         </div>
