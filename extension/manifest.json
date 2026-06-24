@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "PhiDkick",
+  "version": "0.1.0",
+  "description": "AI research companion for brainstorming, scientific writing, and chatting with your papers.",
+  "permissions": ["sidePanel", "storage", "tabs", "activeTab"],
+  "host_permissions": ["http://localhost:8742/*", "<all_urls>"],
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "options_page": "options.html",
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "PhiDkick"
+  }
+}

@@ -1,0 +1,1019 @@
+/**
+ * PhiDkick — Side Panel Chat UI
+ * Connects to the local server at localhost:8742
+ */
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const SERVER_URL = "http://localhost:8742";
+const POLL_INTERVAL_MS = 5000; // Health check polling
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+let serverConnected = false;
+let projectLoaded = false;
+let projectFiles = []; // {id, name, mimeType} — files in the loaded project
+let projectFolderId = null; // Drive folder ID of the loaded project
+let viewingFile = null; // {name, id} — project file currently open in a browser tab
+let sessionFocus = null; // "brainstorming" | "paper_discussion" | "paper_writing" | "revision" | "other"
+let currentStream = null; // AbortController for SSE
+let bgPort = null; // Port to background service worker (keep-alive only)
+
+// ---------------------------------------------------------------------------
+// DOM Elements
+// ---------------------------------------------------------------------------
+
+const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => document.querySelectorAll(sel);
+
+const dom = {
+  statusDot: $("#status-dot"),
+  projectName: $("#project-name"),
+  connectBanner: $("#connect-banner"),
+  projectBar: $("#project-bar"),
+  driveInput: $("#drive-folder-input"),
+  btnLoad: $("#btn-load-project"),
+  messages: $("#messages"),
+  typingIndicator: $("#typing-indicator"),
+  contextHint: $("#context-hint"),
+  chatInput: $("#chat-input"),
+  btnSend: $("#btn-send"),
+  btnRefresh: $("#btn-refresh"),
+  btnClear: $("#btn-clear"),
+  btnConnect: $("#btn-connect"),
+  btnCopyCmd: $("#btn-copy-cmd"),
+  cmdText: $("#cmd-text"),
+  // Settings
+  btnSettings: $("#btn-settings"),
+  settingsPanel: $("#settings-panel"),
+  btnSettingsClose: $("#btn-settings-close"),
+  btnSettingsSave: $("#btn-settings-save"),
+  cfgProvider: $("#cfg-provider"),
+  cfgApiKey: $("#cfg-api-key"),
+  cfgModel: $("#cfg-model"),
+  cfgBaseUrl: $("#cfg-base-url"),
+  cfgBaseUrlLabel: $("#cfg-base-url-label"),
+  cfgStatus: $("#cfg-status"),
+  // Context window
+  ctxBar: $("#context-usage-bar"),
+  ctxFill: $("#ctx-fill-bar"),
+  ctxStats: $("#ctx-stats"),
+  btnRefreshCtx: $("#btn-refresh-ctx"),
+  // Current tab
+  tabBar: $("#current-tab-bar"),
+  tabIcon: $("#current-tab-bar .tab-icon"),
+  tabTitle: $("#current-tab-title"),
+  tabDomain: $("#current-tab-domain"),
+  btnUseTab: $("#btn-use-tab"),
+};
+
+// ---------------------------------------------------------------------------
+// Server Connection
+// ---------------------------------------------------------------------------
+
+async function checkServerHealth() {
+  try {
+    const res = await fetch(`${SERVER_URL}/health`, {
+      method: "GET",
+      signal: AbortSignal.timeout(3000),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.status === "ok") {
+        setServerStatus("connected");
+        return true;
+      }
+    }
+  } catch (e) {
+    // Server not reachable
+  }
+  setServerStatus("disconnected");
+  return false;
+}
+
+function setServerStatus(status) {
+  serverConnected = status === "connected";
+  dom.statusDot.className = `status-${status}`;
+  dom.statusDot.title = `Server: ${status}`;
+
+  if (serverConnected) {
+    dom.connectBanner.style.display = "none";
+    dom.driveInput.disabled = false;
+    dom.btnLoad.disabled = !dom.driveInput.value.trim();
+  } else {
+    dom.connectBanner.style.display = "block";
+    dom.driveInput.disabled = true;
+    dom.btnLoad.disabled = true;
+    dom.chatInput.disabled = true;
+    dom.btnSend.disabled = true;
+  }
+}
+
+async function connect() {
+  setServerStatus("connecting");
+  const ok = await checkServerHealth();
+  if (ok) {
+    // Show active provider
+    await showProviderInfo();
+    // Check for existing session
+    await checkExistingSession();
+  }
+}
+
+async function showProviderInfo() {
+  try {
+    const res = await fetch(`${SERVER_URL}/chat/providers`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.current && data.current.configured) {
+        dom.contextHint.innerHTML = `🧠 <strong>${data.current.provider}</strong> / ${data.current.model}`;
+        dom.contextHint.classList.remove("hidden");
+      }
+    }
+  } catch (e) {
+    // Provider info not critical
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Settings Panel
+// ---------------------------------------------------------------------------
+
+async function openSettings() {
+  // Toggle: if already open, close it
+  if (!dom.settingsPanel.classList.contains("hidden")) {
+    closeSettings();
+    return;
+  }
+
+  // Populate with current values from server
+  try {
+    const res = await fetch(`${SERVER_URL}/chat/providers`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.current) {
+        dom.cfgProvider.value = data.current.provider || "anthropic";
+        dom.cfgModel.value = data.current.model || "";
+      }
+    }
+  } catch (e) {
+    // Use defaults
+  }
+  dom.cfgApiKey.value = ""; // never pre-fill the key
+  dom.settingsPanel.classList.remove("hidden");
+  handleProviderChange();
+}
+
+function closeSettings() {
+  dom.settingsPanel.classList.add("hidden");
+  dom.cfgStatus.textContent = "";
+  dom.cfgStatus.className = "";
+}
+
+function handleProviderChange() {
+  const provider = dom.cfgProvider.value;
+  if (provider === "custom") {
+    dom.cfgBaseUrl.classList.remove("hidden");
+    dom.cfgBaseUrlLabel.classList.remove("hidden");
+  } else {
+    dom.cfgBaseUrl.classList.add("hidden");
+    dom.cfgBaseUrlLabel.classList.add("hidden");
+  }
+}
+
+async function saveSettings() {
+  const provider = dom.cfgProvider.value;
+  const apiKey = dom.cfgApiKey.value.trim();
+  const model = dom.cfgModel.value.trim();
+  const baseUrl = dom.cfgBaseUrl.value.trim();
+
+  if (!provider) return;
+
+  dom.btnSettingsSave.disabled = true;
+  dom.cfgStatus.textContent = "Saving...";
+  dom.cfgStatus.className = "";
+
+  try {
+    const res = await fetch(`${SERVER_URL}/chat/configure`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider,
+        api_key: apiKey || undefined,
+        model: model || undefined,
+        base_url: baseUrl || undefined,
+        persist: true,
+      }),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      dom.cfgStatus.textContent = "✓ Applied";
+      dom.cfgStatus.className = "";
+      // Update the context hint
+      if (data.current) {
+        dom.contextHint.innerHTML = `🧠 <strong>${data.current.provider}</strong> / ${data.current.model}`;
+        dom.contextHint.classList.remove("hidden");
+      }
+      // Clear the API key field for security
+      dom.cfgApiKey.value = "";
+      // Close after short delay so user sees success
+      setTimeout(closeSettings, 1200);
+    } else {
+      const err = await res.json().catch(() => ({ detail: "Unknown error" }));
+      dom.cfgStatus.textContent = `✗ ${err.detail || "Failed"}`;
+      dom.cfgStatus.className = "error";
+    }
+  } catch (e) {
+    dom.cfgStatus.textContent = `✗ ${e.message}`;
+    dom.cfgStatus.className = "error";
+  } finally {
+    dom.btnSettingsSave.disabled = false;
+  }
+}
+
+async function checkExistingSession() {
+  try {
+    const res = await fetch(`${SERVER_URL}/memory/status`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.active && data.memory) {
+        const mem = data.memory;
+        showSystemMessage(
+          `📋 **Resumed session** from ${mem.last_computer} (last active: ${new Date(mem.last_updated).toLocaleString()})\n\n` +
+          `Project: **${mem.project_folder_name || mem.project_id}**`
+        );
+
+        // Restore project state
+        if (mem.project_folder_id) {
+          dom.driveInput.value = mem.project_folder_id;
+          dom.projectName.textContent = mem.project_folder_name || "PhiDkick";
+
+          // Store project folder ID for tab matching
+          projectFolderId = mem.project_folder_id;
+
+          // Fetch the project file list for tab matching
+          try {
+            const filesRes = await fetch(`${SERVER_URL}/drive/folder/${mem.project_folder_id}/files`);
+            if (filesRes.ok) {
+              const filesData = await filesRes.json();
+              projectFiles = filesData.files || [];
+              detectCurrentTab(); // Refresh tab bar — may now match a project file
+            }
+          } catch (e) {
+            // Non-critical — tab matching just won't work
+          }
+        }
+
+        projectLoaded = true;
+        dom.chatInput.disabled = false;
+        dom.btnSend.disabled = false;
+
+        // Show onboarding options if no focus set yet
+        if (!sessionFocus) showOnboardingOptions();
+      }
+    }
+  } catch (e) {
+    // No existing session
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Project Loading
+// ---------------------------------------------------------------------------
+
+dom.driveInput.addEventListener("input", () => {
+  dom.btnLoad.disabled = !dom.driveInput.value.trim() || !serverConnected;
+});
+
+dom.btnLoad.addEventListener("click", loadProject);
+
+async function loadProject() {
+  const raw = dom.driveInput.value.trim();
+  if (!raw) return;
+
+  // Extract folder ID from URL if needed
+  let folderId = raw;
+  const urlMatch = raw.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+  if (urlMatch) folderId = urlMatch[1];
+
+  // Save for later sessions
+  await chrome.storage.local.set({ driveFolderId: folderId });
+
+  dom.btnLoad.disabled = true;
+  dom.btnLoad.textContent = "Loading...";
+
+  try {
+    // Use the resume endpoint — it loads files AND restores memory in one call
+    showSystemMessage("🔄 Loading project from Google Drive...");
+
+    const resumeRes = await fetch(`${SERVER_URL}/drive/folder/${folderId}/resume`);
+    if (!resumeRes.ok) {
+      const err = await resumeRes.json();
+      if (resumeRes.status === 401) {
+        showSystemMessage(
+          "🔐 Google authentication required.\n\n" +
+          `Please visit **${SERVER_URL}/drive/auth/url** in your browser to sign in with Google, ` +
+          "then click Load Project again."
+        );
+        return;
+      }
+      throw new Error(err.detail || "Failed to load project");
+    }
+
+    const data = await resumeRes.json();
+    const { files, file_count, has_memory, resume_info, folder_name } = data;
+
+    // Store project files and folder ID for tab matching
+    projectFiles = files || [];
+    projectFolderId = folderId;
+    detectCurrentTab(); // Refresh tab bar — may now match a project file
+
+    // Show file listing
+    const sampleFiles = files.slice(0, 15); // show first 15
+    let fileListStr = `📁 **${folder_name}** — ${file_count} files\n\n`;
+    fileListStr += sampleFiles.map(f => `- ${f.name} (${formatSize(f.size)})`).join("\n");
+    if (files.length > 15) {
+      fileListStr += `\n- ... and ${files.length - 15} more files`;
+    }
+    showSystemMessage(fileListStr);
+
+    // Handle resume
+    if (has_memory && resume_info) {
+      showSystemMessage(
+        `📋 **Resumed session**\n\n` +
+        `Last active: **${new Date(resume_info.last_updated).toLocaleString()}** on **${resume_info.last_computer}**\n\n` +
+        `Previous context: ${resume_info.conversation_summary || "None"}`
+      );
+    } else {
+      // Fresh project — initialise memory
+      await fetch(`${SERVER_URL}/memory/init`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          folder_id: folderId,
+          folder_name: folder_name,
+        }),
+      });
+    }
+
+    // Download and process the manuscript + reviewer comments from Drive
+    showSystemMessage("📥 Downloading and processing manuscript...");
+    try {
+      const loadRes = await fetch(`${SERVER_URL}/drive/folder/${folderId}/load-context`, {
+        method: "POST",
+      });
+      if (loadRes.ok) {
+        const loadData = await loadRes.json();
+        showSystemMessage(
+          `📄 **Manuscript loaded**: ${loadData.manuscript.title || loadData.manuscript.name}\n` +
+          `Sections: ${loadData.manuscript.sections.join(", ")}\n` +
+          `Figures found: ${loadData.manuscript.figures.length}\n` +
+          `Files in project: ${loadData.comments.count || 0}`
+        );
+      } else {
+        const err = await loadRes.json().catch(() => ({ detail: "Failed to load context" }));
+        showSystemMessage(`⚠️ Could not auto-detect manuscript: ${err.detail}\n\nYou can still chat, but you'll need to paste your paper text directly.`);
+      }
+    } catch (e) {
+      showSystemMessage(`⚠️ Context loading warning: ${e.message}`);
+    }
+
+    // Verify what was loaded into the chat context
+    const ctxRes = await fetch(`${SERVER_URL}/chat/context`);
+    const ctxData = await ctxRes.json();
+
+    if (ctxData.loaded) {
+      showSystemMessage(
+        `✅ **Ready**\n\n` +
+        `Paper: ${ctxData.paper.title || "Untitled"}\n` +
+        `Sections: ${ctxData.paper.sections.join(", ")}\n` +
+        `Figures: ${ctxData.paper.figures.length}\n\n` +
+        `You can now ask me anything about your project.`
+      );
+      dom.projectName.textContent = ctxData.paper.title || folder_name;
+    }
+
+    projectLoaded = true;
+    dom.chatInput.disabled = false;
+    dom.btnSend.disabled = false;
+
+    // Show context window usage
+    updateContextUsage();
+
+    // Show onboarding focus options
+    if (!sessionFocus) showOnboardingOptions();
+
+  } catch (e) {
+    showSystemMessage(`❌ **Error loading project:** ${e.message}`);
+  } finally {
+    dom.btnLoad.disabled = false;
+    dom.btnLoad.textContent = "Load Project";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Chat
+// ---------------------------------------------------------------------------
+
+dom.btnSend.addEventListener("click", sendMessage);
+dom.chatInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+async function sendMessage() {
+  const text = dom.chatInput.value.trim();
+  if (!text || !projectLoaded) return;
+
+  // Clear input
+  dom.chatInput.value = "";
+  dom.chatInput.style.height = "auto";
+
+  // Show user message
+  addMessage("user", text);
+
+  // Show typing indicator
+  setTyping(true);
+
+  // Abort any existing stream
+  if (currentStream) {
+    currentStream.abort();
+  }
+  currentStream = new AbortController();
+
+  try {
+    const assistantBubble = addMessage("assistant", "", true);
+    let fullResponse = "";
+
+    const res = await fetch(`${SERVER_URL}/chat/send`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: text,
+        current_file: viewingFile || null,
+        session_focus: sessionFocus,
+      }),
+      signal: currentStream.signal,
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(err.detail || "Chat request failed");
+    }
+
+    // Stream the SSE response
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        if (line.startsWith("data: ")) {
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.type === "text") {
+              fullResponse += data.content;
+              renderAssistantMessage(assistantBubble, fullResponse);
+            } else if (data.type === "error") {
+              fullResponse += `\n\n⚠️ Error: ${data.content}`;
+              renderAssistantMessage(assistantBubble, fullResponse);
+            }
+          } catch (e) {
+            // partial JSON, ignore
+          }
+        }
+      }
+    }
+
+    // Update memory after the exchange
+    await fetch(`${SERVER_URL}/memory/update`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_message: text,
+        assistant_message: fullResponse,
+      }),
+    });
+
+    // Refresh context usage
+    updateContextUsage();
+
+  } catch (e) {
+    if (e.name !== "AbortError") {
+      addMessage("system", `❌ ${e.message}`);
+    }
+  } finally {
+    setTyping(false);
+    currentStream = null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Message Rendering
+// ---------------------------------------------------------------------------
+
+function addMessage(role, content, returnBubble = false) {
+  const wrapper = document.createElement("div");
+  wrapper.className = `message ${role}`;
+
+  const bubble = document.createElement("div");
+  bubble.className = "message-content";
+
+  if (role === "system") {
+    // Simple markdown render for system messages
+    bubble.innerHTML = renderMarkdown(content);
+  } else if (role === "user") {
+    bubble.textContent = content;
+  }
+  // For assistant, content is rendered via renderAssistantMessage
+
+  wrapper.appendChild(bubble);
+  dom.messages.appendChild(wrapper);
+  scrollToBottom();
+
+  if (returnBubble) return bubble;
+  return null;
+}
+
+function renderAssistantMessage(bubble, content) {
+  bubble.innerHTML = renderMarkdown(content);
+  scrollToBottom();
+}
+
+function showSystemMessage(content) {
+  addMessage("system", content);
+}
+
+function showOnboardingOptions() {
+  const wrapper = document.createElement("div");
+  wrapper.className = "message system";
+
+  const bubble = document.createElement("div");
+  bubble.className = "message-content";
+  bubble.innerHTML = renderMarkdown(
+    "**What would you like to work on today?**\n\nChoose a focus area to help me tailor our conversation:"
+  );
+
+  const btnRow = document.createElement("div");
+  btnRow.className = "onboarding-buttons";
+
+  const options = [
+    {
+      label: "🧠 Brainstorming",
+      focus: "brainstorming",
+      prompt: "I'd like to brainstorm today. Help me explore ideas, develop hypotheses, and think through research directions.",
+    },
+    {
+      label: "📄 Paper Discussion",
+      focus: "paper_discussion",
+      prompt: "I'd like to discuss my paper today. Help me think through the results, implications, and narrative of my manuscript.",
+    },
+    {
+      label: "✍️ Paper Writing",
+      focus: "paper_writing",
+      prompt: "I'd like to work on writing today. Help me draft, edit, and refine sections of my manuscript.",
+    },
+    {
+      label: "📝 Revision",
+      focus: "revision",
+      prompt: "I'd like to work on peer review revisions today. Help me address reviewer comments and draft responses.",
+    },
+    {
+      label: "💬 Other",
+      focus: "other",
+      prompt: "I have something else in mind today. Let me explain what I need help with.",
+    },
+  ];
+
+  options.forEach((opt) => {
+    const btn = document.createElement("button");
+    btn.className = "onboarding-btn";
+    btn.textContent = opt.label;
+    btn.addEventListener("click", () => {
+      wrapper.remove();
+      sessionFocus = opt.focus;
+      dom.chatInput.value = opt.prompt;
+      dom.chatInput.dispatchEvent(new Event("input"));
+      dom.chatInput.focus();
+    });
+    btnRow.appendChild(btn);
+  });
+
+  bubble.appendChild(btnRow);
+  wrapper.appendChild(bubble);
+  dom.messages.appendChild(wrapper);
+  scrollToBottom();
+}
+
+function renderMarkdown(text) {
+  if (!text) return "";
+
+  // Basic markdown rendering
+  let html = text
+    // Bold
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    // Italic
+    .replace(/\*(.+?)\*/g, "<em>$1</em>")
+    // Inline code
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    // Headers
+    .replace(/^### (.+)$/gm, "<h3>$1</h3>")
+    .replace(/^## (.+)$/gm, "<h2>$1</h2>")
+    .replace(/^# (.+)$/gm, "<h1>$1</h1>")
+    // Unordered lists
+    .replace(/^- (.+)$/gm, "<li>$1</li>")
+    .replace(/((?:<li>.*<\/li>\n?)+)/g, "<ul>$1</ul>")
+    // Line breaks
+    .replace(/\n\n/g, "</p><p>")
+    .replace(/\n/g, "<br>");
+
+  // Wrap in paragraph if not already
+  if (!html.startsWith("<")) {
+    html = `<p>${html}</p>`;
+  }
+
+  // Clean up empty paragraphs
+  html = html.replace(/<p>\s*<\/p>/g, "");
+
+  return html;
+}
+
+function scrollToBottom() {
+  requestAnimationFrame(() => {
+    dom.messages.parentElement.scrollTop = dom.messages.parentElement.scrollHeight;
+  });
+}
+
+function setTyping(visible) {
+  if (visible) {
+    dom.typingIndicator.classList.remove("hidden");
+  } else {
+    dom.typingIndicator.classList.add("hidden");
+  }
+  scrollToBottom();
+}
+
+// ---------------------------------------------------------------------------
+// Context window usage
+// ---------------------------------------------------------------------------
+
+async function updateContextUsage() {
+  if (!projectLoaded) return;
+  try {
+    const res = await fetch(`${SERVER_URL}/chat/context-usage`);
+    if (res.ok) {
+      const data = await res.json();
+      const pct = data.pct_used || 0;
+      dom.ctxFill.style.width = `${Math.min(pct, 100)}%`;
+      dom.ctxStats.textContent = `${data.pct_free}% free`;
+      dom.ctxStats.title = `${data.total_used.toLocaleString()} / ${data.window_size.toLocaleString()} tokens used`;
+
+      // Color coding
+      dom.ctxBar.classList.remove("warning", "danger");
+      if (pct > 90) {
+        dom.ctxBar.classList.add("danger");
+      } else if (pct > 70) {
+        dom.ctxBar.classList.add("warning");
+      }
+
+      dom.ctxBar.classList.remove("hidden");
+    }
+  } catch (e) {
+    // Ignore
+  }
+}
+
+async function refreshContext() {
+  if (!projectLoaded) return;
+  dom.btnRefreshCtx.disabled = true;
+  dom.btnRefreshCtx.textContent = "⏳";
+
+  try {
+    const res = await fetch(`${SERVER_URL}/chat/refresh-context`, {
+      method: "POST",
+    });
+    if (res.ok) {
+      const data = await res.json();
+      showSystemMessage(
+        `🔄 **Context refreshed**\n\n` +
+        `Saved summary of ${data.turns_cleared} chat turns and ${data.decisions_saved} decisions to memory.\n` +
+        `Context window: ${data.context.pct_free}% free (${data.context.remaining.toLocaleString()} tokens remaining).`
+      );
+      updateContextUsage();
+    } else {
+      showSystemMessage("⚠️ Could not refresh context.");
+    }
+  } catch (e) {
+    showSystemMessage(`⚠️ Refresh failed: ${e.message}`);
+  } finally {
+    dom.btnRefreshCtx.disabled = false;
+    dom.btnRefreshCtx.textContent = "↺";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// UI Helpers
+// ---------------------------------------------------------------------------
+
+dom.btnRefresh.addEventListener("click", connect);
+dom.btnClear.addEventListener("click", () => {
+  dom.messages.innerHTML = "";
+  showSystemMessage("Chat cleared. I still remember your project context.");
+});
+
+dom.btnConnect.addEventListener("click", connect);
+
+// Settings panel
+dom.btnSettings.addEventListener("click", openSettings);
+dom.btnSettingsClose.addEventListener("click", closeSettings);
+dom.btnSettingsSave.addEventListener("click", saveSettings);
+dom.cfgProvider.addEventListener("change", handleProviderChange);
+
+// Context refresh
+dom.btnRefreshCtx.addEventListener("click", refreshContext);
+
+dom.chatInput.addEventListener("input", () => {
+  // Auto-resize textarea
+  dom.chatInput.style.height = "auto";
+  dom.chatInput.style.height = Math.min(dom.chatInput.scrollHeight, 180) + "px";
+});
+
+// Manual drag-to-resize handle (top-left corner)
+(function() {
+  const handle = document.getElementById("resize-handle");
+  let resizing = false;
+  let startY = 0;
+  let startHeight = 0;
+
+  handle.addEventListener("mousedown", (e) => {
+    resizing = true;
+    startY = e.clientY;
+    startHeight = dom.chatInput.offsetHeight;
+    document.body.style.cursor = "ns-resize";
+    document.body.style.userSelect = "none";
+    e.preventDefault();
+  });
+
+  document.addEventListener("mousemove", (e) => {
+    if (!resizing) return;
+    const delta = startY - e.clientY; // drag up = taller
+    const newHeight = Math.max(36, Math.min(180, startHeight + delta));
+    dom.chatInput.style.height = newHeight + "px";
+  });
+
+  document.addEventListener("mouseup", () => {
+    if (!resizing) return;
+    resizing = false;
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+  });
+})();
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function formatSize(bytes) {
+  if (!bytes || bytes === 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
+}
+
+// ---------------------------------------------------------------------------
+// Current Tab Detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse Google Drive URLs to extract folder or file IDs.
+ * Returns { type: "folder"|"file", id: string } or null.
+ */
+function parseDriveUrl(url) {
+  if (!url) return null;
+
+  // Drive folder: drive.google.com/drive/folders/<id>
+  let m = url.match(/drive\.google\.com\/drive\/(?:u\/\d+\/)?folders\/([a-zA-Z0-9_-]+)/);
+  if (m) return { type: "folder", id: m[1] };
+
+  // Drive file: drive.google.com/file/d/<id>
+  m = url.match(/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/);
+  if (m) return { type: "file", id: m[1] };
+
+  // Google Docs: docs.google.com/document/d/<id>
+  m = url.match(/docs\.google\.com\/document\/d\/([a-zA-Z0-9_-]+)/);
+  if (m) return { type: "file", id: m[1] };
+
+  // Google Sheets: docs.google.com/spreadsheets/d/<id>
+  m = url.match(/docs\.google\.com\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+  if (m) return { type: "file", id: m[1] };
+
+  // Google Slides: docs.google.com/presentation/d/<id>
+  m = url.match(/docs\.google\.com\/presentation\/d\/([a-zA-Z0-9_-]+)/);
+  if (m) return { type: "file", id: m[1] };
+
+  return null;
+}
+
+/**
+ * Extract a readable domain label from a URL.
+ */
+function domainLabel(url) {
+  if (!url) return "";
+  try {
+    const host = new URL(url).hostname;
+    return host.replace(/^www\./, "");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Update the tab bar with the given tab info from the background worker.
+ * (Side panels can't read url/title directly — the worker relays it.)
+ */
+function updateTabBar(tab) {
+  if (!tab || !tab.url) {
+    dom.tabBar.classList.add("hidden");
+    viewingFile = null;
+    return;
+  }
+
+  // Skip chrome:// and extension pages
+  if (tab.url.startsWith("chrome://") || tab.url.startsWith("chrome-extension://")) {
+    dom.tabBar.classList.add("hidden");
+    viewingFile = null;
+    return;
+  }
+
+  dom.tabBar.classList.remove("hidden");
+  viewingFile = null;
+
+  // Check for Google Drive URLs
+  const driveInfo = parseDriveUrl(tab.url);
+  if (driveInfo) {
+    dom.tabBar.classList.add("drive-tab");
+
+    if (driveInfo.type === "folder") {
+      dom.tabIcon.textContent = "📁";
+      // Check if this is the project folder itself
+      if (projectFolderId && driveInfo.id === projectFolderId) {
+        dom.tabTitle.textContent = "Project folder";
+        dom.tabBar.classList.add("viewing-project-file");
+        dom.btnUseTab.classList.add("hidden"); // already loaded
+      } else {
+        dom.tabTitle.textContent = tab.title || "Untitled";
+        dom.tabBar.classList.remove("viewing-project-file");
+        dom.btnUseTab.classList.remove("hidden");
+        dom.btnUseTab.textContent = "Load this folder";
+        dom.btnUseTab.dataset.folderId = driveInfo.id;
+      }
+    } else {
+      // It's a Drive file — check if it belongs to the loaded project
+      dom.btnUseTab.classList.add("hidden");
+      const match = projectFiles.find(f => f.id === driveInfo.id);
+      if (match) {
+        dom.tabIcon.textContent = "📄";
+        dom.tabTitle.textContent = `Viewing: ${match.name}`;
+        dom.tabBar.classList.add("viewing-project-file");
+        viewingFile = { name: match.name, id: match.id };
+      } else {
+        dom.tabIcon.textContent = "📄";
+        dom.tabTitle.textContent = tab.title || "Untitled";
+        dom.tabBar.classList.remove("viewing-project-file");
+      }
+    }
+  } else {
+    dom.tabIcon.textContent = "📄";
+    dom.tabBar.classList.remove("drive-tab", "viewing-project-file");
+    dom.btnUseTab.classList.add("hidden");
+    dom.tabTitle.textContent = tab.title || "Untitled";
+  }
+
+  dom.tabDomain.textContent = domainLabel(tab.url);
+  console.log("[TabBar] Current tab:", tab.title, "|", domainLabel(tab.url), "| viewingFile:", viewingFile);
+}
+
+/**
+ * Query the active tab via the background service worker.
+ * The side panel cannot read url/title from chrome.tabs.query directly.
+ */
+async function detectCurrentTab(retries = 3) {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const response = await chrome.runtime.sendMessage({ type: "getCurrentTab" });
+      console.log("[TabBar] BG response:", response);
+
+      if (response && response.ok) {
+        updateTabBar({ title: response.title, url: response.url, id: response.id });
+        return;
+      } else {
+        console.log("[TabBar] No tab from BG:", response);
+      }
+    } catch (err) {
+      console.warn(`[TabBar] Attempt ${i + 1}/${retries + 1} failed:`, err.message);
+    }
+
+    if (i < retries) {
+      // Wait before retrying — the service worker may still be waking up
+      await new Promise(r => setTimeout(r, 500 * (i + 1)));
+    }
+  }
+
+  // All retries exhausted
+  console.error("[TabBar] All retries failed — service worker may be inactive");
+  dom.tabBar.classList.add("hidden");
+  viewingFile = null;
+}
+
+/** Wire up the "Load this folder" button to pre-fill the Drive input */
+function initTabBar() {
+  console.log("[TabBar] Initializing tab bar...");
+
+  dom.btnUseTab.addEventListener("click", () => {
+    const folderId = dom.btnUseTab.dataset.folderId;
+    if (folderId) {
+      dom.driveInput.value = folderId;
+      dom.driveInput.dispatchEvent(new Event("input")); // trigger validation
+      dom.driveInput.scrollIntoView({ behavior: "smooth" });
+    }
+  });
+
+  // Tab changes are pushed proactively by the background service worker
+  // via the port — no need for chrome.tabs listeners here.
+}
+
+// ---------------------------------------------------------------------------
+// Init
+// ---------------------------------------------------------------------------
+
+async function init() {
+  // Show the command to start the server.
+  // chrome.runtime.getURL() returns an internal chrome-extension:// URL,
+  // not a filesystem path, so we can't derive the real project directory.
+  // The user should run this from the project root.
+  const startCmd = `cd scientific-paper-assistant && ./start.sh`;
+  dom.cmdText.textContent = startCmd;
+
+  // Wire up the copy button
+  dom.btnCopyCmd.addEventListener("click", () => {
+    navigator.clipboard.writeText(startCmd).then(() => {
+      dom.btnCopyCmd.textContent = "✓";
+      setTimeout(() => { dom.btnCopyCmd.textContent = "📋"; }, 2000);
+    });
+  });
+
+  // Load saved settings
+  const stored = await chrome.storage.local.get(["driveFolderId"]);
+  if (stored.driveFolderId) {
+    dom.driveInput.value = stored.driveFolderId;
+  }
+
+  // Open a port to the background worker.
+  // The worker pushes tab changes via this port (proactive updates).
+  bgPort = chrome.runtime.connect({ name: "sidepanel" });
+  bgPort.onMessage.addListener((msg) => {
+    if (msg.type === "activeTabChanged" && msg.tab) {
+      updateTabBar(msg.tab);
+    }
+  });
+  bgPort.onDisconnect.addListener(() => {
+    console.warn("[TabBar] Background port disconnected");
+    bgPort = null;
+  });
+
+  // Ping every 20s to keep the service worker from going inactive
+  setInterval(() => {
+    if (bgPort) {
+      try { bgPort.postMessage({ type: "ping" }); } catch (e) { /* port closed */ }
+    }
+  }, 20000);
+
+  console.log("[TabBar] Connected to background worker");
+
+  // Detect current tab and listen for changes
+  console.log("[TabBar] Starting tab detection...");
+  initTabBar();
+  detectCurrentTab();
+
+  // Connect to server
+  await connect();
+
+  // Poll health
+  setInterval(checkServerHealth, POLL_INTERVAL_MS);
+}
+
+init();

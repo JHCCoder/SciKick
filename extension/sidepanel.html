@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PhiDkick</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <!-- Top Bar -->
+  <header id="topbar">
+    <div id="status-dot" class="status-disconnected" title="Server status"></div>
+    <h1 id="project-name">PhiDkick</h1>
+    <button id="btn-settings" title="LLM Settings">⚙</button>
+    <button id="btn-refresh" title="Refresh connection">⟳</button>
+    <button id="btn-clear" title="Clear chat">✕</button>
+  </header>
+
+  <!-- Settings Panel (hidden by default) -->
+  <div id="settings-panel" class="hidden">
+    <div class="settings-header">
+      <h3>⚙ LLM Configuration</h3>
+      <button id="btn-settings-close" title="Close">✕</button>
+    </div>
+    <div class="settings-body">
+      <label>Provider</label>
+      <select id="cfg-provider">
+        <option value="anthropic">Anthropic (Claude)</option>
+        <option value="deepseek">DeepSeek</option>
+        <option value="openai">OpenAI (GPT-4o)</option>
+        <option value="custom">Custom (OpenAI-compatible)</option>
+      </select>
+
+      <label>API Key</label>
+      <input type="password" id="cfg-api-key" placeholder="sk-...">
+
+      <label>Model</label>
+      <input type="text" id="cfg-model" placeholder="e.g. deepseek-v4-pro">
+
+      <label id="cfg-base-url-label" class="hidden">Base URL</label>
+      <input type="text" id="cfg-base-url" class="hidden" placeholder="https://api.deepseek.com">
+
+      <div class="settings-actions">
+        <button id="btn-settings-save" class="btn-primary">Save & Apply</button>
+        <span id="cfg-status"></span>
+      </div>
+      <p class="hint">Changes take effect immediately and are saved for next restart.</p>
+    </div>
+  </div>
+
+  <!-- Connection Banner (shown when not connected) -->
+  <div id="connect-banner" class="banner">
+    <p><strong>⚠️ Backend server not running</strong></p>
+    <p>The assistant needs a local server to work. Open a terminal and run:</p>
+    <div id="startup-command">
+      <code id="cmd-text">cd scientific-paper-assistant && ./start.sh</code>
+      <button id="btn-copy-cmd" title="Copy command">📋</button>
+    </div>
+    <p class="hint">Then click <strong>Retry</strong> below or the ⟳ button.</p>
+    <button id="btn-connect" class="btn-primary">⟳ Retry Connection</button>
+  </div>
+
+  <!-- Project Selector -->
+  <div id="project-bar">
+    <input type="text" id="drive-folder-input"
+           placeholder="Paste Google Drive folder ID or URL..."
+           title="The Google Drive folder containing your paper and reviewer comments">
+    <button id="btn-load-project" class="btn-primary" disabled>Load Project</button>
+  </div>
+
+  <!-- Current Tab Indicator -->
+  <div id="current-tab-bar">
+    <span class="tab-icon">📄</span>
+    <span id="current-tab-title" class="tab-title">Detecting current tab...</span>
+    <span id="current-tab-domain" class="tab-domain"></span>
+    <button id="btn-use-tab" class="hidden" title="Use this folder">Load this folder</button>
+  </div>
+
+  <!-- Chat Area -->
+  <main id="chat-container">
+    <div id="messages">
+      <div class="message system">
+        <div class="message-content">
+          <p><strong>PhiDkick</strong></p>
+          <p>Welcome! I'm your AI research companion. I can help you:</p>
+          <ul>
+            <li>Brainstorm ideas and develop hypotheses</li>
+            <li>Discuss and refine your scientific writing</li>
+            <li>Analyze data, figures, and results</li>
+            <li>Navigate and respond to peer review</li>
+          </ul>
+          <p>To get started, paste your Google Drive folder ID above and click <strong>Load Project</strong>.</p>
+        </div>
+      </div>
+    </div>
+    <div id="typing-indicator" class="hidden">
+      <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+    </div>
+  </main>
+
+  <!-- Input Area -->
+  <footer id="input-area">
+    <div id="context-hint" class="hidden"></div>
+    <div id="context-usage-bar" class="hidden" title="Context window usage">
+      <div class="ctx-label">Context</div>
+      <div class="ctx-track">
+        <div class="ctx-fill" id="ctx-fill-bar"></div>
+      </div>
+      <div class="ctx-stats" id="ctx-stats">0%</div>
+      <button id="btn-refresh-ctx" title="Save progress & clear chat history to free context window">↺</button>
+    </div>
+    <div id="input-row">
+      <div id="input-wrapper">
+        <div id="resize-handle" title="Drag to resize">⋮⋮</div>
+        <textarea id="chat-input" rows="2"
+                  placeholder="Ask about a reviewer comment, or draft a response..."
+                  disabled></textarea>
+      </div>
+      <button id="btn-send" disabled title="Send message (Enter)">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/>
+        </svg>
+      </button>
+    </div>
+  </footer>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Google OAuth — CONTAINS SECRETS, NEVER COMMIT
+google_credentials.json
+google_token.json
+
+# Environment variables (API keys)
+.env
+
+# Local cache
+.scientific-paper-assistant/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code
+.claude/
+
+# Logs
+code_log.txt
