@@ -1,8 +1,10 @@
 """Google Drive integration — OAuth2, file listing, download, and memory sync."""
 
+import asyncio
 import io
 import logging
 import pickle
+from functools import partial
 from pathlib import Path
 from typing import Optional
 
@@ -353,8 +355,20 @@ async def load_memory_file(folder_id: str):
     return {"exists": True, "memory": memory, "modifiedTime": files[0]["modifiedTime"]}
 
 
-def _save_memory_to_drive(folder_id: str, memory: dict) -> None:
-    """Save a memory dict as .revision-memory.json in the Drive folder."""
+async def _run_in_thread(fn, *args, **kwargs):
+    """Run a blocking call in the default thread pool to avoid blocking the event loop."""
+    return await asyncio.get_event_loop().run_in_executor(
+        None, partial(fn, *args, **kwargs)
+    )
+
+
+async def _save_memory_to_drive(folder_id: str, memory: dict) -> None:
+    """Save a memory dict as .revision-memory.json in the Drive folder.
+
+    Runs blocking Google API calls in a thread pool so the event loop stays
+    responsive for health checks and other requests while the Drive upload
+    is in progress.
+    """
     service = get_drive_service()
     if service is None:
         raise RuntimeError("Not authenticated with Google")
@@ -366,21 +380,23 @@ def _save_memory_to_drive(folder_id: str, memory: dict) -> None:
     content = json.dumps(memory, indent=2, default=str)
     media = io.BytesIO(content.encode("utf-8"))
 
-    # Check if the memory file already exists
-    response = (
+    # Check if the memory file already exists (run in thread pool)
+    response = await _run_in_thread(
         service.files()
         .list(
             q=f"'{folder_id}' in parents and name = '{MEMORY_FILE_NAME}' and trashed = false",
             fields="files(id)",
         )
-        .execute()
+        .execute,
     )
 
     existing = response.get("files", [])
     upload = MediaIoBaseUpload(media, mimetype="application/json", resumable=True)
 
     if existing:
-        service.files().update(fileId=existing[0]["id"], media_body=upload).execute()
+        await _run_in_thread(
+            service.files().update(fileId=existing[0]["id"], media_body=upload).execute,
+        )
         logger.info("Updated .revision-memory.json in Drive folder %s", folder_id)
     else:
         file_metadata = {
@@ -388,7 +404,9 @@ def _save_memory_to_drive(folder_id: str, memory: dict) -> None:
             "parents": [folder_id],
             "mimeType": "application/json",
         }
-        service.files().create(body=file_metadata, media_body=upload).execute()
+        await _run_in_thread(
+            service.files().create(body=file_metadata, media_body=upload).execute,
+        )
         logger.info("Created .revision-memory.json in Drive folder %s", folder_id)
 
 
@@ -396,7 +414,7 @@ def _save_memory_to_drive(folder_id: str, memory: dict) -> None:
 async def save_memory_file(folder_id: str, memory: dict):
     """Save .revision-memory.json to the Drive folder."""
     try:
-        _save_memory_to_drive(folder_id, memory)
+        await _save_memory_to_drive(folder_id, memory)
     except RuntimeError as exc:
         raise HTTPException(status_code=401, detail=str(exc))
     return {"status": "saved"}
@@ -640,9 +658,9 @@ async def load_context(folder_id: str, force: bool = False):
 
     _save_local(memory)
 
-    # Sync to Google Drive
+    # Sync to Google Drive (runs in thread pool to keep event loop responsive)
     try:
-        _save_memory_to_drive(folder_id, memory.model_dump())
+        await _save_memory_to_drive(folder_id, memory.model_dump())
     except Exception as exc:
         logger.warning("load-context: Drive sync failed (non-fatal): %s", exc)
 

@@ -141,7 +141,7 @@ def create_fresh_memory(
     return memory
 
 
-def update_memory_after_chat(
+async def update_memory_after_chat(
     user_message: str,
     assistant_message: str,
     updated_comments: list[ReviewerCommentState] = None,
@@ -195,14 +195,15 @@ def update_memory_after_chat(
             else:
                 memory.reviewer_comments.append(updated)
 
-    # Save locally
+    # Save locally (fast — local filesystem)
     _save_local(memory)
 
-    # Also sync to Google Drive for cross-computer resume
+    # Sync to Google Drive for cross-computer resume.
+    # Runs in a thread pool so the event loop stays responsive.
     if memory.project_folder_id:
         try:
             from drive_sync import _save_memory_to_drive
-            _save_memory_to_drive(memory.project_folder_id, memory.model_dump())
+            await _save_memory_to_drive(memory.project_folder_id, memory.model_dump())
             logger.info("Synced memory to Drive folder %s", memory.project_folder_id)
         except Exception as exc:
             logger.warning("Failed to sync memory to Drive (non-fatal): %s", exc)
@@ -334,25 +335,19 @@ async def memory_status():
 
 @router.post("/update")
 async def update_memory(req: MemoryUpdateRequest):
-    """Update memory after a chat turn and sync to Google Drive."""
+    """Update memory after a chat turn and sync to Google Drive.
+
+    The Drive sync runs in a thread pool so the event loop stays responsive
+    for health checks while the upload is in progress.
+    """
     if get_current_memory() is None:
         return {"status": "skipped", "reason": "No active memory — load a project to persist chat history."}
 
-    update_memory_after_chat(
+    await update_memory_after_chat(
         user_message=req.user_message,
         assistant_message=req.assistant_message,
         updated_comments=req.updated_comments,
     )
-
-    # Sync to Google Drive so other computers can resume
-    memory = get_current_memory()
-    if memory and memory.project_folder_id:
-        try:
-            from drive_sync import _save_memory_to_drive
-            _save_memory_to_drive(memory.project_folder_id, memory.model_dump())
-            logger.info("Synced memory to Drive folder %s", memory.project_folder_id)
-        except Exception as exc:
-            logger.warning("Failed to sync memory to Drive (non-fatal): %s", exc)
 
     return {"status": "updated"}
 

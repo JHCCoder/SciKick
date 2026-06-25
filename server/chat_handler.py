@@ -784,8 +784,8 @@ async def send_message_sync(req: ChatRequest):
         logger.error("LLM API error: %s", exc)
         raise HTTPException(status_code=502, detail=enriched)
 
-    # Update memory
-    update_memory_after_chat(
+    # Update memory (await — Drive sync runs in thread pool)
+    await update_memory_after_chat(
         user_message=req.message,
         assistant_message=assistant_text,
     )
@@ -1042,7 +1042,7 @@ async def refresh_context():
     if memory.project_folder_id:
         try:
             from drive_sync import _save_memory_to_drive
-            _save_memory_to_drive(memory.project_folder_id, memory.model_dump())
+            await _save_memory_to_drive(memory.project_folder_id, memory.model_dump())
         except Exception as exc:
             logger.warning("refresh-context: Drive sync failed: %s", exc)
 

@@ -9,6 +9,7 @@
 
 const SERVER_URL = "http://localhost:8742";
 const POLL_INTERVAL_MS = 5000; // Health check polling
+const HEALTH_FAIL_THRESHOLD = 2; // Consecutive failures before showing disconnected
 
 // ---------------------------------------------------------------------------
 // State
@@ -23,6 +24,7 @@ let currentTabUrl = null; // URL of the currently active browser tab
 let sessionFocus = null; // "brainstorming" | "paper_discussion" | "paper_writing" | "revision" | "other"
 let currentStream = null; // AbortController for SSE
 let loadingInProgress = false; // true during loadProject / scrape — suppress disconnect banner
+let healthFailCount = 0; // consecutive health check failures (prevents false disconnect flash)
 let bgPort = null; // Port to background service worker (keep-alive only)
 
 // ---------------------------------------------------------------------------
@@ -91,21 +93,29 @@ async function checkServerHealth() {
     if (res.ok) {
       const data = await res.json();
       if (data.status === "ok") {
+        healthFailCount = 0;
         setServerStatus("connected");
         return true;
       }
     }
   } catch (e) {
-    // Server not reachable
+    // Server not reachable — could be transient (Drive sync, LLM streaming, etc.)
   }
-  setServerStatus("disconnected");
+
+  // Require HEALTH_FAIL_THRESHOLD consecutive failures before showing disconnected.
+  // This prevents false "backend not connected" flashes when the server is
+  // momentarily busy with Drive uploads or LLM API calls.
+  healthFailCount++;
+  if (healthFailCount >= HEALTH_FAIL_THRESHOLD) {
+    setServerStatus("disconnected");
+  }
   return false;
 }
 
 function setServerStatus(status) {
   // Don't flash the "disconnected" banner while a long-running
-  // operation (project load, scrape) is in progress — the server
-  // is busy, not down.
+  // operation (project load, scrape, memory sync) is in progress —
+  // the server is busy, not down.
   if (status === "disconnected" && loadingInProgress) return;
 
   const wasConnected = serverConnected;
@@ -540,15 +550,22 @@ async function sendMessage() {
       }
     }
 
-    // Update memory after the exchange
-    await fetch(`${SERVER_URL}/memory/update`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        user_message: text,
-        assistant_message: fullResponse,
-      }),
-    });
+    // Update memory after the exchange.
+    // Set loadingInProgress to prevent the health check from flashing
+    // "disconnected" while the Drive sync completes (can take 2-5s).
+    loadingInProgress = true;
+    try {
+      await fetch(`${SERVER_URL}/memory/update`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_message: text,
+          assistant_message: fullResponse,
+        }),
+      });
+    } finally {
+      loadingInProgress = false;
+    }
 
     // Refresh context usage
     updateContextUsage();
