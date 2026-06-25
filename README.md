@@ -6,15 +6,19 @@ An AI research companion — Chrome extension + local server. Brainstorm ideas, 
 
 ## What it does
 
-### Feature Demo
-
-[![Feature Demo](https://img.youtube.com/vi/F5u4WGnunSs/0.jpg)](https://www.youtube.com/watch?v=F5u4WGnunSs)
-
 - **Chat with your papers** — Discuss manuscripts, figure captions, text-based data, and reviewer feedback
 - **Google Drive integration** — Load papers, figures, and documents directly from Drive
 - **Cross-computer resume** — Session state saved to your Drive folder; pick up where you left off
 - **Runs locally** — No hosting costs, your data stays on your machine
 - **Streaming responses** — Real-time AI chat with streaming
+
+### 📹 Video
+
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=F5u4WGnunSs">
+    <img src="https://img.youtube.com/vi/F5u4WGnunSs/0.jpg" alt="Feature Demo" width="480">
+  </a>
+</p>
 
 ### Limitations
 
@@ -62,8 +66,11 @@ Chrome Extension (side panel) ↔ Local Server (localhost:8742) ↔ Google Drive
 |----------|---------------|---------------|
 | **Anthropic (Claude)** | [console.anthropic.com](https://console.anthropic.com/) | `claude-sonnet-4-6` |
 | **DeepSeek** | [platform.deepseek.com](https://platform.deepseek.com/) | `deepseek-chat` |
+| **Zhipu AI (GLM)** | [open.bigmodel.cn](https://open.bigmodel.cn/) | `glm-4-plus` |
 | **OpenAI (GPT-4o)** | [platform.openai.com](https://platform.openai.com/) | `gpt-4o` |
 | **Custom** (Ollama, Groq, Together, etc.) | Your provider | Any |
+
+> 💡 Want support for a specific AI provider? Open an issue or start a discussion on GitHub — we can usually add it quickly.
 
 ### 1. Get the code
 
