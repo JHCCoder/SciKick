@@ -1,4 +1,4 @@
-# 📄 SciKick
+# <img src="SciKick_logo.svg" width="28" height="28" alt="logo"> SciKick
 
 An AI research companion — Chrome extension + local server. Brainstorm ideas, discuss your scientific writing, analyze text-based data, and navigate peer review. Works with any scientific field.
 
