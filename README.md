@@ -1,4 +1,4 @@
-# <img src="SciKick_logo.svg" width="28" height="28" alt="logo"> SciKick
+# <img src="SciKick_logo.png" width="28" height="28" alt="logo"> SciKick
 
 An AI research companion — Chrome extension + local server. Brainstorm ideas, discuss your scientific writing, analyze text-based data, and navigate peer review. Works with any scientific field.
 
@@ -12,7 +12,7 @@ An AI research companion — Chrome extension + local server. Brainstorm ideas, 
 - **Runs locally** — No hosting costs, your data stays on your machine
 - **Streaming responses** — Real-time AI chat with streaming
 
-### 📹 Video
+### 📹 Feature Demo Video
 
 <p align="center">
   <a href="https://www.youtube.com/watch?v=F5u4WGnunSs">
