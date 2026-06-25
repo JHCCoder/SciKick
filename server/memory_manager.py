@@ -336,7 +336,7 @@ async def memory_status():
 async def update_memory(req: MemoryUpdateRequest):
     """Update memory after a chat turn and sync to Google Drive."""
     if get_current_memory() is None:
-        raise HTTPException(status_code=400, detail="No active memory. Initialise first.")
+        return {"status": "skipped", "reason": "No active memory — load a project to persist chat history."}
 
     update_memory_after_chat(
         user_message=req.user_message,

@@ -2,15 +2,22 @@
 
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Buy%20me%20a%20coffee-ff5e5b?logo=ko-fi)](https://ko-fi.com/scikick)
 
-An AI research companion — Chrome extension + local server. Brainstorm ideas, discuss your scientific writing, analyze data, and navigate peer review. Works with any scientific field.
+[![Demo Video](https://img.youtube.com/vi/F5u4WGnunSs/0.jpg)](https://www.youtube.com/watch?v=F5u4WGnunSs)
+
+An AI research companion — Chrome extension + local server. Brainstorm ideas, discuss your scientific writing, analyze text-based data, and navigate peer review. Works with any scientific field.
 
 ## What it does
 
-- **Chat with your papers** — Discuss manuscripts, figures, data, and reviewer feedback
+- **Chat with your papers** — Discuss manuscripts, figure captions, text-based data, and reviewer feedback
 - **Google Drive integration** — Load papers, figures, and documents directly from Drive
 - **Cross-computer resume** — Session state saved to your Drive folder; pick up where you left off
 - **Runs locally** — No hosting costs, your data stays on your machine
 - **Streaming responses** — Real-time AI chat with streaming
+
+### Limitations
+
+- **Figures and images are not visually analyzed** — scikick extracts text from your files, not images. The AI can discuss figures via their captions and surrounding text, but cannot "see" graphs, microscopy images, or charts. If you need visual analysis, describe the figure or paste a screenshot directly.
+- **Some LLM providers are text-only** — DeepSeek does not support image input at all. Use Claude or GPT-4o if you need any visual capability.
 
 ## Side Panel Overview
 
@@ -307,7 +314,7 @@ This is normal for a local app. Click "Advanced" → "Go to scikick (unsafe)" to
 ## Tips
 
 - **Use a Google Sheet for reviewer comments** — easier to track status and add draft responses
-- **Name figures clearly** — `fig2_main_results.png` is better than `IMG_4829.png`
+- **Name figures clearly** — the AI reads captions and surrounding text, so `fig2_main_results.png` gives more context than `IMG_4829.png`
 - **Keep the server running** — it's lightweight and stateless between requests
 - **The memory file is human-readable** — you can inspect or edit `.scikick_memory.json` in your Drive folder
 

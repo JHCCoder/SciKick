@@ -351,10 +351,11 @@ first_time_setup() {
     echo -e "${YELLOW}Which LLM provider will you use?${NC}"
     echo "  1) Anthropic (Claude)  — https://console.anthropic.com/"
     echo "  2) DeepSeek             — https://platform.deepseek.com/"
-    echo "  3) OpenAI (GPT-4o)      — https://platform.openai.com/"
-    echo "  4) Custom (OpenAI-compatible — Ollama, Groq, Together, etc.)"
+    echo "  3) Zhipu AI (GLM)       — https://open.bigmodel.cn/"
+    echo "  4) OpenAI (GPT-4o)      — https://platform.openai.com/"
+    echo "  5) Custom (OpenAI-compatible — Ollama, Groq, Together, etc.)"
     echo ""
-    read -r -p "Enter choice [1-4] (default: 1): " provider_choice
+    read -r -p "Enter choice [1-5] (default: 1): " provider_choice
     provider_choice="${provider_choice:-1}"
 
     case "$provider_choice" in
@@ -371,12 +372,18 @@ first_time_setup() {
             echo "Get your API key at: https://platform.deepseek.com/"
             ;;
         3)
+            LLM_PROVIDER="glm"
+            DEFAULT_MODEL="glm-4-plus"
+            echo -e "${GREEN}Selected: Zhipu AI (GLM)${NC}"
+            echo "Get your API key at: https://open.bigmodel.cn/"
+            ;;
+        4)
             LLM_PROVIDER="openai"
             DEFAULT_MODEL="gpt-4o"
             echo -e "${GREEN}Selected: OpenAI${NC}"
             echo "Get your API key at: https://platform.openai.com/"
             ;;
-        4)
+        5)
             LLM_PROVIDER="custom"
             DEFAULT_MODEL=""
             echo -e "${GREEN}Selected: Custom (OpenAI-compatible)${NC}"
@@ -405,6 +412,9 @@ first_time_setup() {
     elif [ "$LLM_PROVIDER" = "deepseek" ]; then
         key_var="DEEPSEEK_API_KEY"
         key_url="https://platform.deepseek.com/"
+    elif [ "$LLM_PROVIDER" = "glm" ]; then
+        key_var="GLM_API_KEY"
+        key_url="https://open.bigmodel.cn/"
     elif [ "$LLM_PROVIDER" = "openai" ]; then
         key_var="OPENAI_API_KEY"
         key_url="https://platform.openai.com/"
@@ -562,7 +572,7 @@ start_server() {
     fi
 
     # Check for any LLM API key
-    if [ -z "${LLM_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${DEEPSEEK_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
+    if [ -z "${LLM_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${DEEPSEEK_API_KEY:-}" ] && [ -z "${GLM_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
         echo -e "${RED}Error: No LLM API key found.${NC}"
         echo "Run './start.sh --setup' first, or set LLM_API_KEY in your shell."
         exit 1

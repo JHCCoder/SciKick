@@ -12,7 +12,6 @@ import logging
 from datetime import datetime, timezone
 from typing import AsyncGenerator, Optional
 
-import httpx
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -46,6 +45,32 @@ _current_doc_source: str = ""  # "drive:<folder_id>"
 # Web-scraped papers — accumulate (multiple allowed), separate from Drive context
 _scraped_docs: list[PaperDocument] = []
 _scraped_sources: list[str] = []  # URLs, parallel to _scraped_docs
+
+# Focused file cache — file_id → parsed text content
+_focused_file_cache: dict[str, str] = {}
+
+# Project file index — file name (lowercase) → file_id, for name-based lookups
+_project_file_index: dict[str, str] = {}
+
+
+def set_project_file_index(files: list[dict]) -> None:
+    """Populate the file name→id index from a Drive file listing.
+
+    Called by drive_sync after loading a project folder.
+    Each file dict should have 'id' and 'name' keys.
+    """
+    global _project_file_index
+    _project_file_index.clear()
+    for f in files:
+        fid = f.get("id")
+        name = f.get("name", "")
+        if fid and name:
+            # Index both the full name and just the filename (strip path)
+            full = name.lower()
+            basename = name.rsplit("/", 1)[-1].lower() if "/" in name else full
+            _project_file_index[full] = fid
+            if basename != full:
+                _project_file_index[basename] = fid
 
 
 def set_project_context(
@@ -158,6 +183,46 @@ class ChatResponse(BaseModel):
 # Core chat logic
 # ---------------------------------------------------------------------------
 
+def _estimate_context_usage() -> dict:
+    """Estimate current context window usage (reused by system prompt and endpoint)."""
+    window_size, model = _get_context_window_size()
+
+    system_tokens = _estimate_tokens(SYSTEM_PROMPT)
+    resume_tokens = _estimate_tokens(RESUME_PROMPT_EXTENSION)
+
+    retrieval_tokens = (3 * 4000 // 4) + (5 * 500 // 4)  # ~3625 tokens
+
+    history_tokens = 0
+    memory = get_current_memory()
+    if memory and memory.chat_history:
+        history_tokens = sum(
+            _estimate_tokens(t.content) for t in memory.chat_history
+        )
+
+    scraped_tokens = sum(
+        _estimate_tokens(doc.full_text[:6000]) + 200
+        for doc in _scraped_docs
+    )
+
+    message_reserve = 8000
+
+    total_used = (
+        system_tokens + resume_tokens + retrieval_tokens
+        + history_tokens + scraped_tokens + message_reserve
+    )
+
+    pct_used = round(min((total_used / window_size) * 100, 100), 1)
+    remaining = max(window_size - total_used, 0)
+
+    return {
+        "model": model,
+        "window_size": window_size,
+        "total_used": total_used,
+        "remaining": remaining,
+        "pct_used": pct_used,
+    }
+
+
 def _build_system_prompt() -> str:
     """Build the full system prompt including resume context if available."""
     prompt = SYSTEM_PROMPT
@@ -170,12 +235,140 @@ def _build_system_prompt() -> str:
     except Exception:
         pass
 
+    # Context window awareness — let the model know how much room it has
+    try:
+        ctx = _estimate_context_usage()
+        guidance = ""
+        if ctx["pct_used"] > 90:
+            guidance = " The window is almost full — be extremely concise (a few sentences at most)."
+        elif ctx["pct_used"] > 75:
+            guidance = " The window is getting full — keep your responses focused and avoid unnecessary detail."
+        elif ctx["pct_used"] > 50:
+            guidance = " You have moderate headroom — you can respond at normal length."
+        else:
+            guidance = " You have plenty of room — feel free to be thorough and expansive."
+        prompt += (
+            f"\n\n## Context Window Status\n"
+            f"Window: {ctx['window_size']:,} tokens | "
+            f"In use: ~{ctx['total_used']:,} tokens ({ctx['pct_used']}%) | "
+            f"Remaining: ~{ctx['remaining']:,} tokens.{guidance}"
+        )
+    except Exception:
+        pass
+
     memory = get_current_memory()
     if memory and memory.chat_history:
         prompt += "\n\n" + RESUME_PROMPT_EXTENSION
         prompt += "\n" + build_resume_context()
 
     return prompt
+
+
+# Trigger words/phrases that signal the user wants full file content.
+# "scan" alone is a trigger — covers "scan this file", "scan Reviewer file", etc.
+_FOCUS_TRIGGERS = [
+    "scan",           # "scan this file", "can you scan Reviewer comment file?"
+    "read this file", "read the file", "read the contents",
+    "analyze this file", "analyze the file",
+    "look at this file", "look at the file",
+    "examine this file", "examine the file",
+    "what's in this file", "what is in this file",
+    "show me this file", "show me the file",
+    "parse this file", "parse the file",
+    "tell me about this file", "tell me about the file",
+    "check this file", "check the file",
+    "review this file", "review the file",
+    "go through this file", "go through the file",
+    "open this file", "open the file",
+]
+
+
+async def _download_and_parse_file(file_id: str, file_name: str) -> str | None:
+    """Download and parse a project file from Drive. Returns parsed text or None."""
+    global _focused_file_cache
+
+    # Return cached content if available
+    if file_id in _focused_file_cache:
+        logger.info("Focus file: using cached content for '%s' (%s)", file_name, file_id)
+        return _focused_file_cache[file_id]
+
+    try:
+        from drive_sync import download_file
+
+        logger.info("Focus file: downloading '%s' (%s)", file_name, file_id)
+        downloaded = await download_file(file_id)
+        mime = downloaded.get("mimeType", "")
+        parsed_text = ""
+
+        if mime == "application/pdf" and "content_bytes" in downloaded:
+            from context_engine import parse_pdf
+            content_bytes = bytes.fromhex(downloaded["content_bytes"])
+            doc = parse_pdf(content_bytes, file_name)
+            parsed_text = doc.full_text
+        elif mime in ("application/vnd.openxmlformats-officedocument.wordprocessingml.document",) and "content_bytes" in downloaded:
+            from context_engine import parse_docx
+            content_bytes = bytes.fromhex(downloaded["content_bytes"])
+            doc = parse_docx(content_bytes, file_name)
+            parsed_text = doc.full_text
+        elif mime in ("application/vnd.google-apps.document", "text/markdown") and "text" in downloaded:
+            parsed_text = downloaded["text"]
+        elif mime == "application/vnd.google-apps.spreadsheet" and "sheets" in downloaded:
+            # Format sheets data as text
+            lines = []
+            for sheet_title, rows in downloaded.get("sheets", {}).items():
+                lines.append(f"\n### Sheet: {sheet_title}")
+                for row in rows:
+                    lines.append(" | ".join(str(cell) for cell in row))
+            parsed_text = "\n".join(lines)
+        elif "text" in downloaded:
+            parsed_text = downloaded["text"]
+        elif "content_bytes" in downloaded:
+            from context_engine import parse_text
+            raw = bytes.fromhex(downloaded["content_bytes"]).decode("utf-8", errors="replace")
+            doc = parse_text(raw, file_name)
+            parsed_text = doc.full_text
+        else:
+            logger.warning("Focus file: unknown format for '%s' (%s)", file_name, mime)
+            return None
+
+        # Cache for subsequent messages
+        if parsed_text:
+            _focused_file_cache[file_id] = parsed_text
+            logger.info("Focus file: parsed and cached '%s' (%d chars)", file_name, len(parsed_text))
+        return parsed_text
+
+    except Exception as exc:
+        logger.error("Focus file: failed to parse '%s': %s", file_name, exc)
+        return None
+
+
+def _should_focus_file(message: str, current_file: dict | None) -> tuple[str | None, str | None]:
+    """Check whether the user is asking to focus on a file. Returns (file_id, file_name) or (None, None).
+
+    Two ways to trigger:
+    1. current_file is set (file open in browser tab) + trigger phrase in message
+    2. User mentions a project file by name in the message + trigger phrase
+    """
+    msg_lower = message.lower()
+    has_trigger = any(trigger in msg_lower for trigger in _FOCUS_TRIGGERS)
+    if not has_trigger:
+        return None, None
+
+    # Case 1: current_file is set (file open in browser tab)
+    if current_file and current_file.get("id"):
+        return current_file["id"], current_file.get("name", "unknown")
+
+    # Case 2: user mentioned a project file by name
+    global _project_file_index
+    for fname_lower, fid in _project_file_index.items():
+        # Check if the file name (or its basename without extension) appears in the message
+        basename = fname_lower.rsplit(".", 1)[0] if "." in fname_lower else fname_lower
+        if fname_lower in msg_lower or basename in msg_lower:
+            logger.info("Focus file: matched '%s' in message, file_id=%s", fname_lower, fid)
+            # Find the original cased name
+            return fid, fname_lower
+
+    return None, None
 
 
 def _build_user_message(
@@ -185,6 +378,7 @@ def _build_user_message(
     focus_figure: Optional[str] = None,
     current_file: Optional[dict] = None,
     session_focus: Optional[str] = None,
+    focused_file_content: Optional[str] = None,
 ) -> str:
     """Build the enriched user message with retrieved context."""
     global _current_doc, _current_comments, _image_cache
@@ -205,8 +399,20 @@ def _build_user_message(
             parts.append(f"## Session Focus: {session_focus}\n{desc}\n")
             parts.append("---\n")
 
-    # Current file the user is viewing
-    if current_file and current_file.get("name"):
+    # Focused file — full content injected when user asks to scan/read a file
+    if focused_file_content and current_file and current_file.get("name"):
+        parts.append(
+            f"## Focused File: {current_file['name']}\n"
+            f"The user has asked to focus on this file. Below is the FULL content. "
+            f"Read it carefully and be prepared to answer detailed questions about it.\n\n"
+            f"Note: Figures, images, and embedded graphics may appear as garbled binary or "
+            f"base64 text — you cannot parse those. Skip over them and focus on the "
+            f"readable text content. If the user asks about a figure you cannot read, "
+            f"tell them honestly and ask them to describe or paste the figure content.\n"
+        )
+        parts.append(focused_file_content)
+        parts.append("---\n")
+    elif current_file and current_file.get("name"):
         parts.append(
             f"## Current File\n"
             f"The user is currently viewing this file from the project: **{current_file['name']}**"
@@ -482,14 +688,24 @@ async def send_message(req: ChatRequest):
     """Send a message to the revision assistant (streaming SSE)."""
     provider = _get_provider()
 
+    # If the user mentions a trigger phrase while viewing a file or naming a file,
+    # download and parse the full content
+    focused_file_content: str | None = None
+    focused_file_name: str | None = None
+    focus_id, focus_name = _should_focus_file(req.message, req.current_file)
+    if focus_id:
+        focused_file_name = focus_name
+        focused_file_content = await _download_and_parse_file(focus_id, focus_name)
+
     system_prompt = _build_system_prompt()
     user_message = _build_user_message(
         message=req.message,
         include_paper=req.include_paper_context,
         include_comments=req.include_reviewer_comments,
         focus_figure=req.focus_figure,
-        current_file=req.current_file,
+        current_file={"name": focused_file_name, "id": focus_id} if focused_file_name else req.current_file,
         session_focus=req.session_focus,
+        focused_file_content=focused_file_content,
     )
 
     logger.info(
@@ -530,14 +746,24 @@ async def send_message_sync(req: ChatRequest):
     """Send a message and get a complete (non-streaming) response."""
     provider = _get_provider()
 
+    # If the user mentions a trigger phrase while viewing a file or naming a file,
+    # download and parse the full content
+    focused_file_content: str | None = None
+    focused_file_name: str | None = None
+    focus_id, focus_name = _should_focus_file(req.message, req.current_file)
+    if focus_id:
+        focused_file_name = focus_name
+        focused_file_content = await _download_and_parse_file(focus_id, focus_name)
+
     system_prompt = _build_system_prompt()
     user_message = _build_user_message(
         message=req.message,
         include_paper=req.include_paper_context,
         include_comments=req.include_reviewer_comments,
         focus_figure=req.focus_figure,
-        current_file=req.current_file,
+        current_file={"name": focused_file_name, "id": focus_id} if focused_file_name else req.current_file,
         session_focus=req.session_focus,
+        focused_file_content=focused_file_content,
     )
 
     try:
@@ -719,17 +945,14 @@ async def context_usage():
     relevant chunks are injected via keyword retrieval. This endpoint
     estimates what's actually sent to the LLM on a typical turn.
     """
-    window_size, model = _get_context_window_size()
+    ctx = _estimate_context_usage()
 
+    # Recompute individual breakdown components for the frontend
     system_tokens = _estimate_tokens(SYSTEM_PROMPT)
     resume_tokens = _estimate_tokens(RESUME_PROMPT_EXTENSION)
+    retrieval_chunks_estimate = 3 * 4000 // 4
+    retrieval_comments_estimate = 5 * 500 // 4
 
-    # Retrieval injects ~3 chunks of up to 4000 chars each + ~5 comments
-    retrieval_chunks_estimate = 3 * 4000 // 4  # ~3000 tokens
-    retrieval_comments_estimate = 5 * 500 // 4   # ~625 tokens
-    retrieval_tokens = retrieval_chunks_estimate + retrieval_comments_estimate
-
-    # Chat history tokens (capped at CHAT_HISTORY_LIMIT turns)
     history_tokens = 0
     memory = get_current_memory()
     if memory and memory.chat_history:
@@ -737,38 +960,27 @@ async def context_usage():
             _estimate_tokens(t.content) for t in memory.chat_history
         )
 
-    # Scraped papers tokens (each paper's body capped at 6000 chars + metadata)
     scraped_tokens = sum(
-        _estimate_tokens(doc.full_text[:6000]) + 200  # 200 for title/abstract/section metadata
+        _estimate_tokens(doc.full_text[:6000]) + 200
         for doc in _scraped_docs
     )
 
-    # Current message + response reserve
-    message_reserve = 8000  # ~2000 tokens for message + 6000 for response
-
-    total_used = (
-        system_tokens
-        + resume_tokens
-        + retrieval_tokens
-        + history_tokens
-        + scraped_tokens
-        + message_reserve
-    )
-
-    pct_used = round(min((total_used / window_size) * 100, 100), 1)
-    remaining = max(window_size - total_used, 0)
+    pct_used = ctx["pct_used"]
+    remaining = ctx["remaining"]
 
     return {
-        "model": model,
-        "window_size": window_size,
+        "model": ctx["model"],
+        "window_size": ctx["window_size"],
         "breakdown": {
             "system_prompt": system_tokens,
+            "resume_prompt": resume_tokens,
             "retrieval_chunks": retrieval_chunks_estimate,
+            "retrieval_comments": retrieval_comments_estimate,
             "chat_history": history_tokens,
             "scraped_papers": scraped_tokens,
-            "message_reserve": message_reserve,
+            "message_reserve": 8000,
         },
-        "total_used": total_used,
+        "total_used": ctx["total_used"],
         "remaining": remaining,
         "pct_used": pct_used,
         "pct_free": round(100 - pct_used, 1),
@@ -946,6 +1158,8 @@ async def reset_all_state():
     """
     global _current_doc, _current_comments, _image_cache, _current_doc_source
     global _scraped_docs, _scraped_sources
+    global _focused_file_cache
+    global _project_file_index
 
     from memory_manager import get_current_memory, set_current_memory
 
@@ -962,6 +1176,8 @@ async def reset_all_state():
     _current_doc_source = ""
     _scraped_docs = []
     _scraped_sources = []
+    _focused_file_cache = {}
+    _project_file_index = {}
 
     if existing_memory is not None:
         set_current_memory(None)
@@ -985,6 +1201,8 @@ async def unload_project():
     Use this when switching projects without losing web-scraped papers.
     """
     global _current_doc, _current_comments, _image_cache, _current_doc_source
+    global _focused_file_cache
+    global _project_file_index
 
     from memory_manager import get_current_memory, set_current_memory
 
@@ -996,7 +1214,9 @@ async def unload_project():
     _current_doc = None
     _current_comments = []
     _image_cache = {}
+    _focused_file_cache = {}
     _current_doc_source = ""
+    _project_file_index = {}
 
     if existing_memory is not None:
         set_current_memory(None)

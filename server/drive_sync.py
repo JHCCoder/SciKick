@@ -429,7 +429,7 @@ async def load_context(folder_id: str, force: bool = False):
         extract_reviewer_comments,
         extract_reviewer_comments_from_sheets,
     )
-    from chat_handler import set_project_context, _current_doc, _current_comments, _current_doc_source
+    from chat_handler import set_project_context, set_project_file_index, _current_doc, _current_comments, _current_doc_source
 
     # 1. Initialise or retrieve memory
     from memory_manager import (
@@ -612,6 +612,7 @@ async def load_context(folder_id: str, force: bool = False):
 
     # 7. Load into chat handler
     set_project_context(doc, comments, images, source=f"drive:{folder_id}")
+    set_project_file_index(all_files)  # Build file name→id index for file-focus feature
 
     # 8. Update memory with paper sections, comment states, and file snapshots
     update_paper_sections([

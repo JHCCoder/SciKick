@@ -43,9 +43,10 @@ GOOGLE_SCOPES = [
 # LLM Provider — unified multi-provider configuration
 # ---------------------------------------------------------------------------
 
-# Provider: "anthropic" | "deepseek" | "openai" | "custom"
+# Provider: "anthropic" | "deepseek" | "glm" | "openai" | "custom"
 #   anthropic  → uses Anthropic SDK, model defaults to claude-sonnet-4-6
 #   deepseek   → uses OpenAI-compatible SDK, base_url = https://api.deepseek.com
+#   glm        → uses OpenAI-compatible SDK, base_url = https://open.bigmodel.cn/api/paas/v4
 #   openai     → uses OpenAI SDK, base_url = https://api.openai.com/v1
 #   custom     → uses OpenAI-compatible SDK, base_url = LLM_BASE_URL (required)
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic").lower()
@@ -53,7 +54,7 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic").lower()
 # API key — use the unified key, or fall back to provider-specific ones
 LLM_API_KEY = os.getenv(
     "LLM_API_KEY",
-    os.getenv("ANTHROPIC_API_KEY", os.getenv("DEEPSEEK_API_KEY", os.getenv("OPENAI_API_KEY", ""))),
+    os.getenv("ANTHROPIC_API_KEY", os.getenv("DEEPSEEK_API_KEY", os.getenv("GLM_API_KEY", os.getenv("OPENAI_API_KEY", "")))),
 )
 
 # Model name — if not set, auto-selected based on provider
@@ -71,6 +72,10 @@ PROVIDER_DEFAULTS = {
     "deepseek": {
         "model": "deepseek-v4-pro",
         "base_url": "https://api.deepseek.com",
+    },
+    "glm": {
+        "model": "glm-4-plus",
+        "base_url": "https://open.bigmodel.cn/api/paas/v4",
     },
     "openai": {
         "model": "gpt-4o",
@@ -121,7 +126,10 @@ def _save_runtime_config_to_env() -> None:
     _set_or_append("LLM_PROVIDER", config["provider"])
     _set_or_append("LLM_API_KEY", config["api_key"])
     _set_or_append("LLM_MODEL", config["model"])
-    if config.get("base_url"):
+    # Only persist base_url for "custom" provider — known providers
+    # (anthropic, deepseek, glm, openai) have correct defaults in PROVIDER_DEFAULTS.
+    # Persisting them would leak a stale URL when switching providers later.
+    if config.get("base_url") and config["provider"] == "custom":
         _set_or_append("LLM_BASE_URL", config["base_url"])
 
     env_path.write_text("\n".join(lines) + "\n")
@@ -133,7 +141,18 @@ def get_llm_config() -> dict:
     defaults = PROVIDER_DEFAULTS.get(provider, PROVIDER_DEFAULTS["anthropic"])
 
     model = _runtime_overrides.get("model") or LLM_MODEL or defaults["model"]
-    base_url = _runtime_overrides.get("base_url") if "base_url" in _runtime_overrides else (LLM_BASE_URL or defaults.get("base_url", ""))
+
+    # Base URL resolution order:
+    #   1. Explicit runtime override (set by /chat/configure with a value)
+    #   2. Provider default (for known providers like glm, deepseek, openai)
+    #   3. LLM_BASE_URL from .env (for "custom" provider, or to override a known one)
+    if "base_url" in _runtime_overrides:
+        base_url = _runtime_overrides["base_url"]
+    elif defaults.get("base_url"):
+        base_url = defaults["base_url"]  # provider's known URL takes priority
+    else:
+        base_url = LLM_BASE_URL  # only for "custom" or unlisted providers
+
     api_key = _runtime_overrides.get("api_key") or LLM_API_KEY
 
     # Validate

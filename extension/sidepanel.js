@@ -40,7 +40,6 @@ const dom = {
   driveInput: $("#drive-folder-input"),
   btnLoad: $("#btn-load-project"),
   messages: $("#messages"),
-  typingIndicator: $("#typing-indicator"),
   contextHint: $("#context-hint"),
   chatInput: $("#chat-input"),
   btnSend: $("#btn-send"),
@@ -700,15 +699,6 @@ function scrollToBottom() {
   requestAnimationFrame(() => {
     dom.messages.parentElement.scrollTop = dom.messages.parentElement.scrollHeight;
   });
-}
-
-function setTyping(visible) {
-  if (visible) {
-    dom.typingIndicator.classList.remove("hidden");
-  } else {
-    dom.typingIndicator.classList.add("hidden");
-  }
-  scrollToBottom();
 }
 
 // ---------------------------------------------------------------------------
