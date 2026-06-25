@@ -1,12 +1,14 @@
 # 📄 SciKick
 
-[![Ko-fi](https://img.shields.io/badge/Ko--fi-Buy%20me%20a%20coffee-ff5e5b?logo=ko-fi)](https://ko-fi.com/scikick)
-
-[![Demo Video](https://img.youtube.com/vi/F5u4WGnunSs/0.jpg)](https://www.youtube.com/watch?v=F5u4WGnunSs)
-
 An AI research companion — Chrome extension + local server. Brainstorm ideas, discuss your scientific writing, analyze text-based data, and navigate peer review. Works with any scientific field.
 
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Buy%20me%20a%20coffee-ff5e5b?logo=ko-fi)](https://ko-fi.com/scikick)
+
 ## What it does
+
+### Feature Demo
+
+[![Feature Demo](https://img.youtube.com/vi/F5u4WGnunSs/0.jpg)](https://www.youtube.com/watch?v=F5u4WGnunSs)
 
 - **Chat with your papers** — Discuss manuscripts, figure captions, text-based data, and reviewer feedback
 - **Google Drive integration** — Load papers, figures, and documents directly from Drive
@@ -16,8 +18,9 @@ An AI research companion — Chrome extension + local server. Brainstorm ideas, 
 
 ### Limitations
 
-- **Figures and images are not visually analyzed** — SciKick extracts text from your files, not images. The AI can discuss figures via their captions and surrounding text, but cannot "see" graphs, microscopy images, or charts. If you need visual analysis, describe the figure or paste a screenshot directly.
-- **Some LLM providers are text-only** — DeepSeek does not support image input at all. Use Claude or GPT-4o if you need any visual capability.
+- **Figures and images are not automatically analyzed** — SciKick extracts text from your files, not images. The AI can discuss figures via their captions and surrounding text, but cannot "see" graphs, microscopy images, or charts embedded in your documents.
+- **Manual workaround** — You can paste screenshots of figures directly into the chat for visual analysis. This works with multi-modal LLMs like **Claude** (Sonnet 4, Opus 4, Fable 5) and **GPT-4o**.
+- **Future plans** — If enough people ask for it, we'll add automatic figure extraction and parsing from PDFs and DOCX files. Let us know!
 
 ## Side Panel Overview
 
