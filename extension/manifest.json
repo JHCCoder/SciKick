@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "AI research companion for brainstorming, scientific writing, and chatting with your papers.",
   "permissions": ["sidePanel", "storage", "tabs", "activeTab", "scripting"],
-  "host_permissions": ["http://localhost:8742/*", "<all_urls>"],
+  "host_permissions": ["http://localhost:8742/*"],
   "side_panel": {
     "default_path": "sidepanel.html"
   },
