@@ -1,4 +1,4 @@
-# 📄 scikick
+# 📄 SciKick
 
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Buy%20me%20a%20coffee-ff5e5b?logo=ko-fi)](https://ko-fi.com/scikick)
 
@@ -16,7 +16,7 @@ An AI research companion — Chrome extension + local server. Brainstorm ideas, 
 
 ### Limitations
 
-- **Figures and images are not visually analyzed** — scikick extracts text from your files, not images. The AI can discuss figures via their captions and surrounding text, but cannot "see" graphs, microscopy images, or charts. If you need visual analysis, describe the figure or paste a screenshot directly.
+- **Figures and images are not visually analyzed** — SciKick extracts text from your files, not images. The AI can discuss figures via their captions and surrounding text, but cannot "see" graphs, microscopy images, or charts. If you need visual analysis, describe the figure or paste a screenshot directly.
 - **Some LLM providers are text-only** — DeepSeek does not support image input at all. Use Claude or GPT-4o if you need any visual capability.
 
 ## Side Panel Overview
@@ -128,7 +128,7 @@ Visit [http://localhost:8742/drive/auth/url](http://localhost:8742/drive/auth/ur
 
 ### 6. Load a project and start chatting
 
-1. Click the scikick icon 📄 in your Chrome toolbar to open the side panel
+1. Click the SciKick icon 📄 in your Chrome toolbar to open the side panel
 2. Paste your Google Drive folder URL (or ID):
    ```
    https://drive.google.com/drive/folders/1abc123...
@@ -196,7 +196,7 @@ You can also use a **Google Sheet** for reviewer comments — the system auto-de
 
 ## Sharing with Labmates
 
-Each person needs their own setup — scikick runs locally and uses personal API keys and Google credentials.
+Each person needs their own setup — SciKick runs locally and uses personal API keys and Google credentials.
 
 ### For a labmate setting up from scratch
 
@@ -307,7 +307,7 @@ Make sure the server is running (`./start.sh`). The status dot in the top bar sh
 Make sure you created an OAuth client ID of type "Desktop application" (not "Web application"). Re-run `./start.sh --setup` to redo the credentials.
 
 **"This app isn't verified" warning during Google sign-in**
-This is normal for a local app. Click "Advanced" → "Go to scikick (unsafe)" to continue. You added yourself as a test user during setup, so this works.
+This is normal for a local app. Click "Advanced" → "Go to SciKick (unsafe)" to continue. You added yourself as a test user during setup, so this works.
 
 ---
 
@@ -320,7 +320,7 @@ This is normal for a local app. Click "Advanced" → "Go to scikick (unsafe)" to
 
 ## Support
 
-If scikick saves you time on your research, [buy me a coffee on Ko-fi](https://ko-fi.com/scikick) ☕. It helps cover development time and keeps the tool free for everyone.
+If SciKick saves you time on your research, [buy me a coffee on Ko-fi](https://ko-fi.com/scikick) ☕. It helps cover development time and keeps the tool free for everyone.
 
 ## License
 
