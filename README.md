@@ -302,7 +302,16 @@ Run `./start.sh --setup` again, or edit `.env` directly and restart the server.
 
 ---
 
-## Troubleshooting
+## Tips & Troubleshooting
+
+### Tips
+
+- **Use a Google Sheet for reviewer comments** — easier to track status and add draft responses
+- **Name figures clearly** — the AI reads captions and surrounding text, so `fig2_main_results.png` gives more context than `IMG_4829.png`
+- **Keep the server running** — it's lightweight and stateless between requests
+- **The memory file is human-readable** — you can inspect or edit `.scikick_memory.json` in your Drive folder
+
+### Troubleshooting
 
 **Server won't start — "No LLM API key found"**
 Run `./start.sh --setup` to configure your API key, or create a `.env` file with `LLM_API_KEY=your-key-here`.
@@ -321,25 +330,18 @@ This is normal for a local app. Click "Advanced" → "Go to SciKick (unsafe)" to
 
 ---
 
-## Tips
-
-- **Use a Google Sheet for reviewer comments** — easier to track status and add draft responses
-- **Name figures clearly** — the AI reads captions and surrounding text, so `fig2_main_results.png` gives more context than `IMG_4829.png`
-- **Keep the server running** — it's lightweight and stateless between requests
-- **The memory file is human-readable** — you can inspect or edit `.scikick_memory.json` in your Drive folder
-
-## Support
+## Support, Stars & License
 
 If SciKick saves you time on your research, [buy me a coffee on Ko-fi](https://ko-fi.com/scikick) ☕.
 
-## License
-
-MIT
-
----
-
 <p align="center">
-  <a href="https://star-history.com/#JHCCoder/scikick&Date">
+  <a href="https://www.star-history.com/?repos=JHCCoder%2FSciKick&type=date&legend=top-left">
+    <img src="https://api.star-history.com/svg?repos=JHCCoder/SciKick&type=Date" alt="Star History Chart">
+  </a>
+  <br>
+  <a href="https://github.com/JHCCoder/scikick/stargazers">
     <img src="https://img.shields.io/github/stars/JHCCoder/scikick?style=social" alt="GitHub stars">
   </a>
 </p>
+
+MIT
