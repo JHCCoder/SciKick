@@ -113,33 +113,16 @@ async def auth_callback(state: str = Query(...), code: str = Query(...)):
 
     flow.redirect_uri = "http://localhost:8742/drive/auth/callback"
     try:
-        flow.fetch_token(code=code)
+        # fetch_token() does blocking I/O — run it in the thread pool so the
+        # event loop stays responsive (exceptions raised in the thread, including
+        # the scope-change Warning below, propagate to the caller when awaited).
+        await _run_in_thread(flow.fetch_token, code=code)
     except Warning:
         # Scope change warning (e.g., upgrading from read-only to read-write).
         # The token response is valid — fetch_token sets credentials before the
         # validation warning fires, but the raise prevents it. Fetch again without
         # scope validation by constructing credentials directly from the response.
-        import requests
-        from google.oauth2.credentials import Credentials as GCreds
-        token_response = requests.post(
-            flow.client_config["token_uri"],
-            data={
-                "code": code,
-                "client_id": flow.client_config["client_id"],
-                "client_secret": flow.client_config["client_secret"],
-                "redirect_uri": flow.redirect_uri,
-                "grant_type": "authorization_code",
-            },
-            timeout=30,
-        ).json()
-        flow.credentials = GCreds(
-            token=token_response.get("access_token"),
-            refresh_token=token_response.get("refresh_token"),
-            token_uri=flow.client_config["token_uri"],
-            client_id=flow.client_config["client_id"],
-            client_secret=flow.client_config["client_secret"],
-            scopes=GOOGLE_SCOPES,
-        )
+        await _run_in_thread(_exchange_token_for_changed_scope, flow, code)
         logger.warning("OAuth scope changed — token obtained with new scopes")
     _save_credentials(flow.credentials)
 
@@ -149,6 +132,37 @@ async def auth_callback(state: str = Query(...), code: str = Query(...)):
     _sheets_service = None
 
     return {"status": "authenticated"}
+
+
+def _exchange_token_for_changed_scope(flow, code: str) -> None:
+    """Blocking recovery for an OAuth scope change.
+
+    When ``fetch_token`` raises because the requested scopes differ from the
+    previously granted ones, exchange the code directly and build credentials
+    without scope validation. Run via :func:`_run_in_thread`.
+    """
+    import requests
+    from google.oauth2.credentials import Credentials as GCreds
+
+    token_response = requests.post(
+        flow.client_config["token_uri"],
+        data={
+            "code": code,
+            "client_id": flow.client_config["client_id"],
+            "client_secret": flow.client_config["client_secret"],
+            "redirect_uri": flow.redirect_uri,
+            "grant_type": "authorization_code",
+        },
+        timeout=30,
+    ).json()
+    flow.credentials = GCreds(
+        token=token_response.get("access_token"),
+        refresh_token=token_response.get("refresh_token"),
+        token_uri=flow.client_config["token_uri"],
+        client_id=flow.client_config["client_id"],
+        client_secret=flow.client_config["client_secret"],
+        scopes=GOOGLE_SCOPES,
+    )
 
 
 @router.get("/auth/status")
@@ -216,13 +230,23 @@ def _list_files_flat(folder_id: str) -> list:
 @router.get("/folder/{folder_id}/files")
 async def list_files(folder_id: str):
     """List all files in a Drive folder (recursive)."""
-    files = _list_files_flat(folder_id)
+    files = await _run_in_thread(_list_files_flat, folder_id)
     return {"files": files, "count": len(files)}
 
 
 @router.get("/file/{file_id}/download")
 async def download_file(file_id: str):
-    """Download a file from Drive and return its content."""
+    """Download a file from Drive and return its content.
+
+    Blocking Google API calls run in a thread pool so the event loop stays
+    responsive for health checks and other requests while downloads are in
+    progress (a large PDF or slow Drive response would otherwise stall it).
+    """
+    return await _run_in_thread(_download_file_sync, file_id)
+
+
+def _download_file_sync(file_id: str) -> dict:
+    """Blocking core of :func:`download_file`. Run via :func:`_run_in_thread`."""
     service = get_drive_service()
     if service is None:
         raise HTTPException(status_code=401, detail="Not authenticated with Google")
@@ -234,9 +258,9 @@ async def download_file(file_id: str):
 
     # Handle Google Docs / Sheets — export as PDF or CSV
     if mime_type == "application/vnd.google-apps.document":
-        return await _export_google_doc(service, file_id, file_name)
+        return _export_google_doc(service, file_id, file_name)
     elif mime_type == "application/vnd.google-apps.spreadsheet":
-        return await _export_google_sheet(file_id)
+        return _export_google_sheet(file_id)
     elif mime_type == "application/vnd.google-apps.presentation":
         content = _export_google_file(service, file_id, "application/pdf")
         return {"name": file_name, "mimeType": "application/pdf", "content": content}
@@ -269,10 +293,8 @@ def _export_google_file(service, file_id: str, mime_type: str) -> str:
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
-async def _export_google_doc(service, file_id: str, file_name: str) -> dict:
+def _export_google_doc(service, file_id: str, file_name: str) -> dict:
     """Export a Google Doc as markdown text."""
-    import base64
-
     request = service.files().export_media(
         fileId=file_id, mimeType="text/markdown"
     )
@@ -285,7 +307,7 @@ async def _export_google_doc(service, file_id: str, file_name: str) -> dict:
     return {"name": file_name, "mimeType": "text/markdown", "text": content}
 
 
-async def _export_google_sheet(file_id: str) -> dict:
+def _export_google_sheet(file_id: str) -> dict:
     """Read a Google Sheet as structured data."""
     sheets = get_sheets_service()
     if sheets is None:
@@ -320,7 +342,16 @@ async def _export_google_sheet(file_id: str) -> dict:
 
 @router.get("/folder/{folder_id}/memory")
 async def load_memory_file(folder_id: str):
-    """Load .revision-memory.json from the Drive folder."""
+    """Load .scikick_memory.json from the Drive folder.
+
+    Blocking Google API calls run in a thread pool so the event loop stays
+    responsive while the memory file is searched and downloaded.
+    """
+    return await _run_in_thread(_load_memory_file_sync, folder_id)
+
+
+def _load_memory_file_sync(folder_id: str) -> dict:
+    """Blocking core of :func:`load_memory_file`. Run via :func:`_run_in_thread`."""
     service = get_drive_service()
     if service is None:
         raise HTTPException(status_code=401, detail="Not authenticated with Google")
@@ -356,8 +387,13 @@ async def load_memory_file(folder_id: str):
 
 
 async def _run_in_thread(fn, *args, **kwargs):
-    """Run a blocking call in the default thread pool to avoid blocking the event loop."""
-    return await asyncio.get_event_loop().run_in_executor(
+    """Run a blocking call in the default thread pool to avoid blocking the event loop.
+
+    Use ``get_running_loop()`` (not the deprecated ``get_event_loop()``) — this
+    is only ever awaited from inside a running event loop, so a running loop
+    always exists.
+    """
+    return await asyncio.get_running_loop().run_in_executor(
         None, partial(fn, *args, **kwargs)
     )
 
@@ -461,7 +497,9 @@ async def load_context(folder_id: str, force: bool = False):
 
     memory = get_current_memory()
     if memory is None:
-        folder_meta = service.files().get(fileId=folder_id, fields="name").execute()
+        folder_meta = await _run_in_thread(
+            service.files().get(fileId=folder_id, fields="name").execute
+        )
         memory = create_fresh_memory(
             folder_id=folder_id,
             folder_name=folder_meta.get("name", ""),
@@ -470,7 +508,7 @@ async def load_context(folder_id: str, force: bool = False):
     previous_snapshots = memory.file_snapshots if not force else {}
 
     # 2. List all files with modification times
-    all_files = _list_files_flat(folder_id)
+    all_files = await _run_in_thread(_list_files_flat, folder_id)
     logger.info("load-context: %d files in folder", len(all_files))
 
     # Build a map of current file states
@@ -784,7 +822,7 @@ async def resume_project(folder_id: str):
         raise HTTPException(status_code=401, detail="Not authenticated with Google")
 
     # 1. List files
-    files = _list_files_flat(folder_id)
+    files = await _run_in_thread(_list_files_flat, folder_id)
 
     # 2. Check for existing memory file
     memory_result = await load_memory_file(folder_id)
@@ -792,7 +830,9 @@ async def resume_project(folder_id: str):
     memory_data = memory_result.get("memory")
 
     # 3. Get folder metadata
-    folder_meta = service.files().get(fileId=folder_id, fields="name").execute()
+    folder_meta = await _run_in_thread(
+        service.files().get(fileId=folder_id, fields="name").execute
+    )
     folder_name = folder_meta.get("name", "Project")
 
     # 4. If memory exists, restore it into the memory manager
