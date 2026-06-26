@@ -784,9 +784,12 @@ start_server() {
     echo -e "${YELLOW}Press Ctrl+C to stop the server${NC}"
     echo ""
 
-    # Check if port is already in use
+    # Check if port is already in use.
+    # `lsof` exits 1 when the port is FREE; the `|| true` keeps `set -e` from
+    # aborting the script on a free port (it would otherwise silently exit
+    # right here, before reaching `python3 main.py`).
     local port_pid
-    port_pid=$(lsof -ti :8742 2>/dev/null)
+    port_pid=$(lsof -ti :8742 2>/dev/null || true)
     if [ -n "$port_pid" ]; then
         echo -e "${RED}Port 8742 is already in use.${NC}"
         echo ""
