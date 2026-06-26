@@ -60,7 +60,7 @@ html.light-theme {
 }
 
 html, body {
-  height: 100%;
+  height: 100dvh;
   overflow: hidden;
   font-family: var(--font-sans);
   font-size: 14px;
@@ -772,7 +772,7 @@ body {
 
 /* --- Input --- */
 #input-area {
-  padding: 8px 12px 12px;
+  padding: 6px 12px 4px;
   border-top: 1px solid var(--border);
   background: var(--bg-secondary);
   flex-shrink: 0;
@@ -781,7 +781,7 @@ body {
 #context-hint {
   font-size: 11px;
   color: var(--text-secondary);
-  margin-bottom: 6px;
+  margin-bottom: 4px;
   padding: 4px 8px;
   background: var(--bg-primary);
   border-radius: 4px;
@@ -798,6 +798,10 @@ body {
 #input-wrapper {
   flex: 1;
   position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  /* Anchor textarea to bottom so height changes expand upward */
 }
 
 #resize-handle {
