@@ -1420,6 +1420,19 @@ function initTabBar() {
 // Init
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Viewport height fix — CSS viewport units (vh/dvh) resolve to the main
+// browser window in Chrome side panels, not the panel itself. Use JS to
+// pin html/body to the actual panel height so the flex layout works.
+// ---------------------------------------------------------------------------
+function fixViewportHeight() {
+  const h = window.innerHeight;
+  document.documentElement.style.height = h + "px";
+  document.body.style.height = h + "px";
+}
+fixViewportHeight();
+window.addEventListener("resize", fixViewportHeight);
+
 async function init() {
   // Show the command to start the server.
   // chrome.runtime.getURL() returns an internal chrome-extension:// URL,

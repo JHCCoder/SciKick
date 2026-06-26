@@ -61,6 +61,8 @@ html.light-theme {
 
 html, body {
   height: 100%;
+  margin: 0;
+  padding: 0;
   overflow: hidden;
   font-family: var(--font-sans);
   font-size: 14px;
@@ -637,12 +639,10 @@ body {
   min-height: 0;
   overflow-y: auto;
   padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
 }
 
 #messages {
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
