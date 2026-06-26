@@ -34,16 +34,135 @@ banner() {
     echo -e "${NC}"
 }
 
+check_python() {
+    # Find a Python 3.10+ interpreter. Sets PYTHON3 variable on success.
+    PYTHON3=""
+
+    # Helper: try a candidate, return 0 (and set PYTHON3) if it's 3.10+
+    _try_python() {
+        local candidate="$1"
+        if command -v "$candidate" &>/dev/null; then
+            local ver
+            ver=$("$candidate" -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null) || return 1
+            if [ -n "$ver" ]; then
+                local major minor
+                major=$(echo "$ver" | cut -d. -f1)
+                minor=$(echo "$ver" | cut -d. -f2)
+                if [ "$major" -ge 3 ] && [ "$minor" -ge 10 ]; then
+                    PYTHON3="$candidate"
+                    echo -e "${GREEN}✓ Python $ver detected ($candidate)${NC}"
+                    return 0
+                fi
+            fi
+        fi
+        return 1
+    }
+
+    # Scan directories where Python may live, checking versioned + unversioned names
+    # Priority: Homebrew > conda > system PATH
+    local search_dirs=""
+    [ -d /opt/homebrew/bin ] && search_dirs="$search_dirs /opt/homebrew/bin"
+    [ -d /usr/local/bin ] && search_dirs="$search_dirs /usr/local/bin"
+    [ -d /usr/local/opt/python@3/bin ] && search_dirs="$search_dirs /usr/local/opt/python@3/bin"
+
+    # Also check conda base if present
+    local conda_python
+    conda_python=$(command -v conda 2>/dev/null)
+
+    # 1) Versioned binaries first: python3.13, python3.12, python3.11, python3.10
+    for dir in $search_dirs; do
+        for ver in 3.13 3.12 3.11 3.10; do
+            _try_python "$dir/python$ver" && return 0
+        done
+    done
+    # Also check conda base for versioned pythons
+    if [ -n "$conda_python" ]; then
+        local conda_root
+        conda_root=$(dirname "$(dirname "$conda_python")")
+        for ver in 3.13 3.12 3.11 3.10; do
+            _try_python "$conda_root/bin/python$ver" && return 0
+        done
+    fi
+
+    # 2) Unversioned python3 in known dirs + PATH
+    for candidate in \
+        /opt/homebrew/bin/python3 \
+        /usr/local/bin/python3 \
+        /usr/local/opt/python@*/bin/python3 \
+        python3; do
+        _try_python "$candidate" && return 0
+    done
+
+    # 3) Check conda environments for python3
+    if [ -n "$conda_python" ]; then
+        for env_dir in "$(dirname "$(dirname "$conda_python")")"/envs/*; do
+            [ -d "$env_dir/bin" ] && _try_python "$env_dir/bin/python3" && return 0
+        done
+    fi
+
+    # No suitable Python found — offer to install
+    echo -e "${YELLOW}⚠ Python 3.10+ is required but was not found.${NC}"
+    echo ""
+
+    if command -v brew &>/dev/null; then
+        echo "scikick requires Python 3.10 or newer."
+        echo "Your system has an older version, which can cause package installation to fail."
+        echo ""
+        echo "I can install Python 3.13 via Homebrew. It is isolated — it won't"
+        echo "replace your system Python or interfere with other projects."
+        echo ""
+        read -r -p "Install Python 3.13 via Homebrew? [Y/n]: " resp
+        if [ "$resp" = "n" ] || [ "$resp" = "N" ]; then
+            echo ""
+            echo -e "${RED}Cannot continue without Python 3.10+.${NC}"
+            echo "Install it manually, then re-run this script."
+            echo "  brew install python@3.13"
+            exit 1
+        fi
+
+        echo ""
+        echo -e "${BLUE}Installing Python 3.13 via Homebrew…${NC}"
+        if ! brew install python@3.13; then
+            echo -e "${RED}✗ Homebrew install failed.${NC}"
+            echo "Try manually: brew install python@3.13"
+            exit 1
+        fi
+
+        # Find the freshly installed python (versioned name first)
+        for candidate in \
+            /opt/homebrew/bin/python3.13 \
+            /opt/homebrew/bin/python3 \
+            /usr/local/bin/python3.13 \
+            /usr/local/bin/python3; do
+            _try_python "$candidate" && return 0
+        done
+
+        echo -e "${RED}✗ Python 3.13 installed but not found on PATH.${NC}"
+        echo "Try: export PATH=\"/opt/homebrew/bin:\$PATH\""
+        echo "Then re-run this script."
+        exit 1
+    else
+        echo -e "${RED}Cannot continue without Python 3.10+.${NC}"
+        echo "Install Python 3.10+ and re-run this script."
+        echo "  macOS:  brew install python@3.13"
+        echo "  Linux:  sudo apt install python3.12  (or your distro's equivalent)"
+        exit 1
+    fi
+}
+
 install_deps() {
     echo -e "${BLUE}Setting up Python virtual environment...${NC}"
 
+    # Ensure Python 3.10+ is available
+    check_python
+
     if [ ! -d "$VENV_DIR" ]; then
-        python3 -m venv "$VENV_DIR"
+        "$PYTHON3" -m venv "$VENV_DIR"
     fi
 
     source "$VENV_DIR/bin/activate"
-    pip install --upgrade pip -q
-    pip install -r "$SERVER_DIR/requirements.txt" -q
+    pip install --upgrade pip
+    pip install -r "$SERVER_DIR/requirements.txt"
 
     echo -e "${GREEN}✓ Dependencies installed${NC}"
 }
@@ -55,7 +174,7 @@ google_credentials_setup() {
 
     if [ -f "$CREDS_FILE" ]; then
         # Validate existing credentials
-        EXISTING_ID=$(python3 -c "
+        EXISTING_ID=$("${PYTHON3:-python3}" -c "
 import json
 try:
     c = json.load(open('$CREDS_FILE'))
@@ -89,10 +208,17 @@ except:
     echo "I'll walk you through this in ~5 minutes."
     echo "You'll need a Google account (any Gmail works)."
     echo ""
+    echo -e "${YELLOW}Why this is needed:${NC}"
+    echo "  scikick's official Google extension is still pending approval"
+    echo "  from Google. Until it's verified, you'll set up your own"
+    echo "  personal Google Cloud project so the app can read your Drive."
+    echo "  This is free, takes ~5 minutes, and you only do it once."
+    echo ""
 
     # ── Step 1: Create project ──
     echo -e "${YELLOW}Step 1/6: Create a Google Cloud project${NC}"
     echo "A 'project' is just a container for your app settings."
+    echo "Name it whatever you like — we recommend 'SciKick'."
     echo ""
     if command -v open &>/dev/null; then
         read -r -p "Open the project creation page in your browser? [Y/n]: " resp
@@ -133,6 +259,7 @@ except:
     else
         echo "Go to: https://console.cloud.google.com/apis/library/sheets.googleapis.com"
     fi
+    echo "  → Make sure your project is selected (dropdown at the top)"
     echo "  → Click the blue 'ENABLE' button"
     read -r -p "Press Enter when done…"
 
@@ -148,30 +275,37 @@ except:
         echo "Go to: https://console.cloud.google.com/apis"
     fi
     echo ""
-    echo "  In the left sidebar, click 'OAuth consent screen'."
+    echo "  → Make sure your project is selected (dropdown at the top)"
+    echo "  → In the left sidebar, click 'OAuth consent screen'."
     echo "  → If this is a new project, you'll see an Overview page with a"
     echo "    'GET STARTED' button (the OAuth platform isn't configured yet)."
     echo "    Click 'GET STARTED'."
     echo ""
-    echo "  On the form that appears:"
-    echo "  → App name:        scikick"
-    echo "  → User support:    your email address"
-    echo "  → Developer contact: your email address"
-    echo "  → Click 'SAVE AND CONTINUE'"
+    echo "  In the Overview page that pops up:"
+    echo "  App information:"
+    echo "  → App name: whatever you like (we recommend 'SciKick')"
+    echo "  → User support email: your email address"
+    echo "  Audience:"
+    echo "  → Select 'External'"
+    echo "    (Internal requires a Google Workspace org —"
+    echo "     External lets your personal Gmail sign in)"
+    echo "  Contact information:"
+    echo "  → Email address: your email address"
+    echo "  Finish:"
+    echo "  → Check the agreement box → 'CONTINUE & CREATE'"
     echo ""
-    echo "  Next: To set up Scopes, go to the 'Data access' section:"
+    echo "  Next to change Scopes go to 'Data access' section:"
     echo "  → Click 'ADD OR REMOVE SCOPES'"
-    echo "  → Add these scopes one at a time:"
+    echo "  → Add these scopes one at a time, or manually type them at the bottom:"
     echo "      https://www.googleapis.com/auth/drive.readonly"
     echo "      https://www.googleapis.com/auth/drive.file"
     echo "      https://www.googleapis.com/auth/spreadsheets.readonly"
-    echo "  → Click 'UPDATE' → 'SAVE AND CONTINUE'"
+    echo "  → Click 'UPDATE' → 'SAVE'"
     echo ""
-    echo "  To add Test users, go to the 'Audience' section:"
+    echo "  Next to add Test user go to 'Audience' section:"
     echo "  → Click 'ADD USERS' → enter your email → 'ADD'"
-    echo "  → (This lets you sign in before Google verifies the app —"
-    echo "     otherwise you'll get an 'unverified app' error.)"
-    echo "  → Click 'SAVE AND CONTINUE' → 'BACK TO DASHBOARD'"
+    echo "  This lets you sign in before Google verifies the app —"
+    echo "     otherwise you'll get an 'unverified app' error."
     read -r -p "Press Enter when done…"
 
     # ── Step 5: Create OAuth client ID ──
@@ -186,6 +320,7 @@ except:
         echo "Go to: https://console.cloud.google.com/apis/credentials"
     fi
     echo ""
+    echo "  → Make sure your project is selected (dropdown at the top)"
     echo "  → Click '+ CREATE CREDENTIALS' (top) → 'OAuth client ID'"
     echo "  → Application type: 'Desktop application'"
     echo "  → Name: 'scikick Desktop'"
@@ -284,7 +419,7 @@ except:
 
     # ── Validate ──
     echo -n "Verifying the credentials file… "
-    CLIENT_ID=$(python3 -c "
+    CLIENT_ID=$("${PYTHON3:-python3}" -c "
 import json, sys
 try:
     c = json.load(open('$CREDS_FILE'))
@@ -321,8 +456,8 @@ except Exception as e:
     echo -e "${GREEN}  Google Drive setup complete!${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-    echo "  After starting the server, visit this URL to sign in:"
-    echo -e "  ${BLUE}http://localhost:8742/drive/auth/url${NC}"
+    echo "  When you run './start.sh' for the first time, you'll be prompted"
+    echo "  to authenticate with Google."
     echo ""
 }
 
@@ -460,15 +595,26 @@ first_time_setup() {
     echo -e "${BLUE}  Background Service${NC}"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
-    echo "  Would you like the server to start automatically when you log in?"
-    echo "  This way you just click the extension — no terminal needed."
+    echo "  The scikick server needs to be running for the Chrome extension to work."
+    echo ""
+    echo "  Normally you'd run './start.sh' in a terminal each time you reboot"
+    echo "  your computer. A background service skips that: it launches the server"
+    echo "  automatically whenever you log into your macOS account (i.e., after"
+    echo "  you turn on or restart your Mac and enter your password)."
+    echo ""
+    echo "  With this enabled, you just click the extension — no terminal needed."
     echo "  (Uses ~30 MB RAM when idle, localhost only, negligible CPU.)"
     echo ""
     read -r -p "  Install as background service? [Y/n]: " resp
     if [ "$resp" != "n" ] && [ "$resp" != "N" ]; then
         install_service
     else
-        echo "  Skipped. Start the server manually with './start.sh' when needed."
+        echo "  Skipped. You'll need to come back to this directory and run"
+        echo "  './start.sh' manually each time you restart your Mac —"
+        echo "  otherwise the extension won't be able to connect."
+        echo ""
+        echo "  You can always install the background service later with:"
+        echo "    ./start.sh --install-service"
     fi
 
     echo ""
@@ -485,9 +631,34 @@ install_service() {
 
     echo ""
     echo -e "${BLUE}Installing background service…${NC}"
-    echo "  This makes the server start automatically when you log in."
+    echo "  This makes the server start automatically when you log into your Mac."
     echo "  No need to run ./start.sh manually — just click the extension."
     echo ""
+
+    # macOS privacy protections block launchd from running scripts inside
+    # Desktop and Documents folders. Warn before installing.
+    case "$SCRIPT_DIR" in
+        */Desktop/*|*/Documents/*)
+            echo -e "${RED}⚠ WARNING: Your project is in a protected folder:${NC}"
+            echo "  $SCRIPT_DIR"
+            echo ""
+            echo "  macOS blocks background services (launchd) from accessing"
+            echo "  files in ~/Desktop and ~/Documents. The service will fail"
+            echo "  with 'Operation not permitted' errors."
+            echo ""
+            echo "  To fix this, move the project to a different location first:"
+            echo "    mv $SCRIPT_DIR ~/scikick"
+            echo ""
+            echo "  Then re-run this setup from the new location:"
+            echo "    cd ~/scikick && ./start.sh --setup"
+            echo ""
+            read -r -p "  Continue anyway? [y/N]: " resp
+            if [ "$resp" != "y" ] && [ "$resp" != "Y" ]; then
+                echo "  Skipping background service."
+                return 1
+            fi
+            ;;
+    esac
 
     mkdir -p "$HOME/Library/LaunchAgents"
     mkdir -p "$HOME/.scikick"
@@ -601,24 +772,46 @@ start_server() {
             echo ""
         fi
 
-        # Google auth reminder
-        CREDS_FILE="$HOME/.scikick/google_credentials.json"
-        if [ -f "$CREDS_FILE" ]; then
-            echo -e "${YELLOW}Authenticate with Google:${NC}"
-            echo "  → Visit http://localhost:8742/drive/auth/url"
-            echo ""
-        else
-            echo -e "${YELLOW}Google Drive not configured yet.${NC}"
-            echo "  → Run './start.sh --setup' to configure it."
-            echo ""
-        fi
+        # Wait for user to complete setup before starting server
+        echo ""
+        read -r -p "Once you've completed the steps above, type 'done' to start the server: " resp
+        while [ "$resp" != "done" ]; do
+            read -r -p "Type 'done' when ready: " resp
+        done
+        echo ""
     fi
 
     echo -e "${YELLOW}Press Ctrl+C to stop the server${NC}"
     echo ""
 
+    # Check if port is already in use
+    local port_pid
+    port_pid=$(lsof -ti :8742 2>/dev/null)
+    if [ -n "$port_pid" ]; then
+        echo -e "${RED}Port 8742 is already in use.${NC}"
+        echo ""
+
+        # Check if the background service is the culprit
+        local plist="$HOME/Library/LaunchAgents/com.scikick.server.plist"
+        if [ -f "$plist" ] && launchctl list com.scikick.server &>/dev/null; then
+            echo "  The background service is running and will auto-restart"
+            echo "  if you just kill the process. Stop it first:"
+            echo ""
+            echo -e "    ${GREEN}./start.sh --uninstall-service${NC}"
+            echo ""
+            echo "  Or to just stop it temporarily:"
+            echo -e "    ${GREEN}launchctl bootout gui/\$(id -u)/com.scikick.server${NC}"
+            echo ""
+        else
+            echo "  To free the port, run:"
+            echo -e "    ${GREEN}lsof -ti :8742 | xargs kill${NC}"
+            echo ""
+        fi
+        exit 1
+    fi
+
     cd "$SERVER_DIR"
-    python3 main.py
+    "$VENV_DIR/bin/python3" main.py
 }
 
 # --- Main ---

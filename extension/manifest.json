@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "scikick",
+  "name": "SciKick",
   "version": "0.1.0",
   "description": "AI research companion for brainstorming, scientific writing, and chatting with your papers.",
   "permissions": ["sidePanel", "storage", "tabs", "activeTab", "scripting"],
@@ -16,6 +16,6 @@
     "128": "icons/icon128.png"
   },
   "action": {
-    "default_title": "scikick"
+    "default_title": "SciKick"
   }
 }

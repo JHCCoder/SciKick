@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>scikick</title>
+  <title>SciKick</title>
   <link rel="stylesheet" href="sidepanel.css">
 </head>
 <body>
   <!-- Top Bar -->
   <header id="topbar">
     <div id="status-dot" class="status-disconnected" title="Server status"></div>
-    <h1 id="project-name">scikick</h1>
+    <h1 id="project-name">SciKick</h1>
     <button id="btn-info" title="Loaded data">ℹ</button>
     <button id="btn-clear" title="Clear chat">—</button>
     <button id="btn-theme" title="Toggle theme">🌙</button>
@@ -65,9 +65,14 @@
   <!-- Connection Banner (shown when not connected) -->
   <div id="connect-banner" class="banner">
     <p><strong>⚠️ Backend server not running</strong></p>
-    <p>The assistant needs a local server to work. Open a terminal and run:</p>
+    <p>The assistant needs a local server to work.</p>
+    <p class="hint">If you've already set up the background service, the server should
+    start automatically when you log into your Mac. If it's still not working,
+    make sure your project folder isn't in ~/Desktop or ~/Documents — macOS
+    blocks background services from those locations.</p>
+    <p>Otherwise, open a terminal and run:</p>
     <div id="startup-command">
-      <code id="cmd-text">cd scikick && ./start.sh</code>
+      <code id="cmd-text"cd SciKick && ./start.sh</code>
       <button id="btn-copy-cmd" title="Copy command">📋</button>
     </div>
     <p class="hint">Then click <strong>Retry</strong> below or the ⟳ button.</p>
@@ -95,7 +100,7 @@
     <div id="messages">
       <div class="message system">
         <div class="message-content">
-          <p><strong>scikick</strong></p>
+          <p><strong>SciKick</strong></p>
           <p>Welcome! I'm your AI research companion. I can help you:</p>
           <ul>
             <li>Brainstorm ideas and develop hypotheses</li>
@@ -105,11 +110,11 @@
           </ul>
           <p><strong>Top bar buttons</strong> (left to right):</p>
           <ul>
-            <li><strong>ℹ</strong> — View loaded data: project files, scraped articles, session info</li>
-            <li><strong>—</strong> — Clear the chat (your project context stays intact)</li>
-            <li><strong>🌙</strong> — Toggle between dark and light theme</li>
-            <li><strong>⚙</strong> — Configure your LLM provider, API key, and model</li>
-            <li><strong>⟳</strong> — Restart your session (wipes chat, re-shows onboarding)</li>
+            <li><strong><span class="icon-emoji">ℹ</span></strong> — View loaded data: project files, scraped articles, session info</li>
+            <li><strong><span class="icon-emoji">—</span></strong> — Clear the chat (your project context stays intact)</li>
+            <li><strong><span class="icon-emoji">🌙</span></strong> — Toggle between dark and light theme</li>
+            <li><strong><span class="icon-emoji">⚙</span></strong> — Configure your LLM provider, API key, and model</li>
+            <li><strong><span class="icon-emoji">⟳</span></strong> — Restart your session (wipes chat, re-shows onboarding)</li>
           </ul>
           <p>You can start chatting right away, or paste a Google Drive folder ID above and click <strong>Load Project</strong> to work with your paper and reviewer comments.</p>
         </div>

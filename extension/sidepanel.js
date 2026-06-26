@@ -138,7 +138,7 @@ function setServerStatus(status) {
       projectFiles = [];
       projectFolderId = null;
       viewingFile = null;
-      dom.projectName.textContent = "scikick";
+      dom.projectName.textContent = "SciKick";
       if (!dom.infoPanel.classList.contains("hidden")) {
         loadInfoPanel();
       }
@@ -298,7 +298,7 @@ async function checkExistingSession() {
         // Restore project state
         if (mem.project_folder_id) {
           dom.driveInput.value = mem.project_folder_id;
-          dom.projectName.textContent = mem.project_folder_name || "scikick";
+          dom.projectName.textContent = mem.project_folder_name || "SciKick";
 
           // Store project folder ID for tab matching
           projectFolderId = mem.project_folder_id;
@@ -648,7 +648,7 @@ function showOnboardingOptions() {
       prompt: "I'd like to work on writing today. Help me draft, edit, and refine sections of my manuscript.",
     },
     {
-      label: "📝 Revision",
+      label: "📝 Paper Revision",
       focus: "revision",
       prompt: "I'd like to work on peer review revisions today. Help me address reviewer comments and draft responses.",
     },
@@ -804,7 +804,7 @@ dom.btnPower.addEventListener("click", async () => {
   projectFiles = [];
   projectFolderId = null;
   viewingFile = null;
-  dom.projectName.textContent = "scikick";
+  dom.projectName.textContent = "SciKick";
 
   // Wipe chat
   dom.messages.innerHTML = "";
@@ -1425,7 +1425,7 @@ async function init() {
   // chrome.runtime.getURL() returns an internal chrome-extension:// URL,
   // not a filesystem path, so we can't derive the real project directory.
   // The user should run this from the project root.
-  const startCmd = `cd scikick && ./start.sh`;
+  const startCmd = `cd SciKick && ./start.sh`;
   dom.cmdText.textContent = startCmd;
 
   // Wire up the copy button
@@ -1519,7 +1519,7 @@ async function init() {
         projectFiles = [];
         projectFolderId = null;
         viewingFile = null;
-        dom.projectName.textContent = "scikick";
+        dom.projectName.textContent = "SciKick";
         loadInfoPanel();
       }
     });

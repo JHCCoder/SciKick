@@ -4,8 +4,8 @@
 # Usage:
 #   ./install-extension.sh
 #
-# Detects your browser, opens the extensions page, copies the extension
-# folder path to your clipboard, and prints clear instructions.
+# Detects your browser, copies the extension folder path to your clipboard,
+# and prints clear instructions.
 
 set -euo pipefail
 
@@ -95,18 +95,10 @@ echo ""
 echo "  4. Select this folder (path is in your clipboard — paste it):"
 echo -e "     ${GREEN}$EXTENSION_DIR${NC}"
 echo ""
-echo "  5. The scikick icon 📄 appears in your toolbar — pin it!"
+echo "  5. Save the setting for the extension to appear in the extension toolbar."
 echo ""
-
-# ── Open extensions page ──
-if command -v open &>/dev/null; then
-    read -r -p "Open $EXTENSIONS_URL in $BROWSER_NAME now? [Y/n]: " resp
-    if [ "$resp" != "n" ] && [ "$resp" != "N" ]; then
-        open -a "$BROWSER" "$EXTENSIONS_URL" 2>/dev/null || \
-        open "$EXTENSIONS_URL" 2>/dev/null || true
-    fi
-fi
-
+echo "  The scikick icon (SciKick_logo.png) should now appear in your toolbar. Pin it!"
 echo ""
-echo -e "${GREEN}Done! Click the scikick icon in your toolbar to open the side panel.${NC}"
+echo "  6. If this is the first time starting this extension, authenticate with Google by visiting:"
+echo "     http://localhost:8742/drive/auth/url"
 echo ""

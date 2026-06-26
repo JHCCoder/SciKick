@@ -758,6 +758,12 @@ body {
 /* Remove old typing indicator (no longer used) */
 #typing-indicator { display: none; }
 
+/* Force emoji to inherit text color instead of platform-native colors */
+.icon-emoji {
+  color: transparent;
+  text-shadow: 0 0 0 var(--text-primary);
+}
+
 @keyframes bounce {
   0%, 80%, 100% { opacity: 0.3; }
   40% { opacity: 1; }
