@@ -734,6 +734,18 @@ uninstall_service() {
     echo ""
 }
 
+# PIDs of processes actively LISTENing on port 8742 (empty if none).
+#
+# We filter to the LISTEN state on purpose: a plain `lsof -ti :8742` also
+# matches stale *client-side* sockets (CLOSE_WAIT / TIME_WAIT left behind in
+# e.g. Chrome after the previous server session ended). Those do NOT prevent
+# binding a new listener — only an actual LISTEN socket does — but they made
+# start.sh refuse to launch with a false "port already in use" and tell the
+# user to kill Chrome, which was wrong. LISTEN-only detection ignores them.
+_port_listen_pids() {
+    lsof -nP -tiTCP:8742 -sTCP:LISTEN 2>/dev/null || true
+}
+
 start_server() {
     echo -e "${BLUE}Starting server...${NC}"
 
@@ -784,12 +796,14 @@ start_server() {
     echo -e "${YELLOW}Press Ctrl+C to stop the server${NC}"
     echo ""
 
-    # Check if port is already in use.
-    # `lsof` exits 1 when the port is FREE; the `|| true` keeps `set -e` from
-    # aborting the script on a free port (it would otherwise silently exit
-    # right here, before reaching `python3 main.py`).
+    # Check if port is already in use — but only count a real LISTEN socket
+    # (see _port_listen_pids: stale client-side CLOSE_WAIT sockets from e.g.
+    # Chrome don't actually hold the port and shouldn't block startup).
+    # `lsof` exits 1 when nothing is listening; the helper's `|| true` keeps
+    # `set -e` from aborting the script on a free port (it would otherwise
+    # silently exit right here, before reaching `python3 main.py`).
     local port_pid
-    port_pid=$(lsof -ti :8742 2>/dev/null || true)
+    port_pid=$(_port_listen_pids)
     if [ -n "$port_pid" ]; then
         if ! resolve_port_conflict; then
             exit 1
@@ -810,7 +824,7 @@ start_server() {
 # Returns 0 if the port is now free, 1 otherwise (caller aborts).
 resolve_port_conflict() {
     local pids
-    pids=$(lsof -ti :8742 2>/dev/null || true)
+    pids=$(_port_listen_pids)
     [ -z "$pids" ] && return 0   # race: freed already
 
     echo -e "${YELLOW}Port 8742 is already in use.${NC}"
@@ -941,10 +955,10 @@ resolve_port_conflict() {
     fi
 
     # ── Final check. ──
-    if lsof -ti :8742 >/dev/null 2>&1; then
+    if [ -n "$(_port_listen_pids)" ]; then
         echo -e "${RED}Port 8742 is still in use.${NC}"
         echo "  Free it manually, then re-run ./start.sh:"
-        echo -e "    ${GREEN}lsof -ti :8742 | xargs kill -9${NC}"
+        echo -e "    ${GREEN}lsof -ti :8742 -sTCP:LISTEN | xargs kill -9${NC}"
         echo ""
         return 1
     fi
@@ -959,7 +973,7 @@ _wait_port_free() {
     while [ "$waited" -lt "$max" ]; do
         sleep 1
         waited=$((waited + 1))
-        if ! lsof -ti :8742 >/dev/null 2>&1; then
+        if [ -z "$(_port_listen_pids)" ]; then
             echo -e "${GREEN}Server stopped and port freed.${NC}"
             return 0
         fi

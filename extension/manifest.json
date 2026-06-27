@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SciKick",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AI research companion for brainstorming, scientific writing, and chatting with your papers.",
   "permissions": ["sidePanel", "storage", "tabs", "activeTab", "scripting"],
   "host_permissions": ["http://localhost:8742/*"],
