@@ -791,30 +791,180 @@ start_server() {
     local port_pid
     port_pid=$(lsof -ti :8742 2>/dev/null || true)
     if [ -n "$port_pid" ]; then
-        echo -e "${RED}Port 8742 is already in use.${NC}"
-        echo ""
-
-        # Check if the background service is the culprit
-        local plist="$HOME/Library/LaunchAgents/com.scikick.server.plist"
-        if [ -f "$plist" ] && launchctl list com.scikick.server &>/dev/null; then
-            echo "  The background service is running and will auto-restart"
-            echo "  if you just kill the process. Stop it first:"
-            echo ""
-            echo -e "    ${GREEN}./start.sh --uninstall-service${NC}"
-            echo ""
-            echo "  Or to just stop it temporarily:"
-            echo -e "    ${GREEN}launchctl bootout gui/\$(id -u)/com.scikick.server${NC}"
-            echo ""
-        else
-            echo "  To free the port, run:"
-            echo -e "    ${GREEN}lsof -ti :8742 | xargs kill${NC}"
-            echo ""
+        if ! resolve_port_conflict; then
+            exit 1
         fi
-        exit 1
     fi
 
     cd "$SERVER_DIR"
     "$VENV_DIR/bin/python3" main.py
+}
+
+# Resolve a "port 8742 already in use" situation interactively.
+#
+# Inspects whatever is holding the port and offers the right action:
+#   - launchd background service → must stop the service (else it respawns)
+#   - suspended scikick (Ctrl+Z) → SIGCONT+SIGTERM (graceful) or kill -9
+#   - running scikick             → SIGTERM (graceful) or kill -9
+#   - foreign (non-scikick) app   → warn, don't auto-kill
+# Returns 0 if the port is now free, 1 otherwise (caller aborts).
+resolve_port_conflict() {
+    local pids
+    pids=$(lsof -ti :8742 2>/dev/null || true)
+    [ -z "$pids" ] && return 0   # race: freed already
+
+    echo -e "${YELLOW}Port 8742 is already in use.${NC}"
+    echo ""
+
+    # ── launchd background service? Killing the process just respawns it. ──
+    local plist="$HOME/Library/LaunchAgents/com.scikick.server.plist"
+    if [ -f "$plist" ] && launchctl list com.scikick.server &>/dev/null; then
+        echo -e "${YELLOW}The scikick background service is managing port 8742.${NC}"
+        echo "  It auto-restarts if you kill the process, so stop the service first:"
+        echo ""
+        echo -e "    ${GREEN}./start.sh --uninstall-service${NC}"
+        echo "  Or pause it temporarily:"
+        echo -e "    ${GREEN}launchctl bootout gui/\$(id -u)/com.scikick.server${NC}"
+        echo ""
+        return 1
+    fi
+
+    # ── Classify each holder: state + whether it's scikick. ──
+    # ps stat: T = stopped (suspended via Ctrl+Z), S/R = running, Z = zombie.
+    local stopped_pids="" running_pids="" foreign_pids=""
+    local pid stat cmd is_scikick
+    for pid in $pids; do
+        stat=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ' || true)
+        cmd=$(ps -o command= -p "$pid" 2>/dev/null || true)
+        if echo "$cmd" | grep -qiE "main\.py|scikick|start\.sh"; then
+            is_scikick=1
+        else
+            is_scikick=0
+        fi
+
+        if [ "$is_scikick" = "0" ]; then
+            foreign_pids="$foreign_pids $pid"
+            echo -e "${YELLOW}  (also held by non-scikick process PID $pid:${NC} ${cmd:0:70}${YELLOW})${NC}"
+            continue
+        fi
+
+        case "$stat" in
+            T*) stopped_pids="$stopped_pids $pid" ;;
+            *)  running_pids="$running_pids $pid" ;;
+        esac
+    done
+
+    # ── Foreign-only holder → don't touch it. ──
+    if [ -n "$foreign_pids" ] && [ -z "$stopped_pids" ] && [ -z "$running_pids" ]; then
+        echo -e "${RED}Port 8742 is held by another application (not scikick).${NC}"
+        echo "  I won't kill it automatically. Check what it is and stop it manually:"
+        echo -e "    ${GREEN}lsof -i :8742${NC}"
+        echo "  Then re-run ./start.sh."
+        echo ""
+        return 1
+    fi
+
+    # ── Suspended scikick (Ctrl+Z): plain kill won't work. ──
+    if [ -n "$stopped_pids" ]; then
+        echo -e "${YELLOW}A scikick server is suspended (you pressed Ctrl+Z) and is still${NC}"
+        echo -e "${YELLOW}holding port 8742. A plain 'kill' won't stop a suspended process.${NC}"
+        echo "  PID(s):$(echo "$stopped_pids" | sed 's/^ *//;s/  */, /g')"
+        echo ""
+        echo "  g) Resume & stop gracefully — SIGCONT + SIGTERM (flushes memory to Drive)"
+        echo "  k) Kill it now — kill -9 (fast, skips the on-close memory flush)"
+        echo "  c) Cancel"
+        read -r -p "  Choose [g/k/c] (default: g): " resp
+        resp="${resp:-g}"
+        case "$resp" in
+            g|G)
+                # Resume (SIGCONT) so the pending SIGTERM can take effect, then
+                # SIGTERM → uvicorn graceful shutdown → lifespan flush.
+                kill -CONT $stopped_pids 2>/dev/null || true
+                sleep 0.3
+                kill -TERM $stopped_pids 2>/dev/null || true
+                echo -e "${BLUE}Resumed + sent SIGTERM — waiting for graceful shutdown…${NC}"
+                if ! _wait_port_free 20; then
+                    echo -e "${YELLOW}Still holding the port after 20s — force killing.${NC}"
+                    kill -9 $stopped_pids 2>/dev/null || true
+                    sleep 1
+                fi
+                ;;
+            k|K)
+                kill -9 $stopped_pids 2>/dev/null || true
+                echo -e "${GREEN}Killed suspended server.${NC}"
+                sleep 1
+                ;;
+            *)
+                echo "Cancelled."
+                return 1
+                ;;
+        esac
+        # The uvicorn reloader parent (python3 main.py with reload=True) is
+        # also suspended and isn't the port holder, so it lingers after we
+        # signal its child. Nudge the user to clean it up in their terminal.
+        echo -e "${YELLOW}Note: the suspended launcher may still linger in the terminal${NC}"
+        echo -e "${YELLOW}where you pressed Ctrl+Z. Clean it up there with:${NC}"
+        echo -e "    ${GREEN}fg %1   (then Ctrl+C)${NC}  — or —  ${GREEN}kill -9 %1${NC}"
+        echo ""
+    fi
+
+    # ── Running scikick: graceful SIGTERM (uvicorn shuts down + flushes). ──
+    if [ -n "$running_pids" ]; then
+        echo -e "${YELLOW}A scikick server is already running (PID$(echo "$running_pids" | sed 's/^ *//;s/  */, /')).${NC}"
+        echo "  Stopping it gracefully lets it flush memory to Drive before exiting."
+        echo ""
+        echo "  s) Stop it gracefully — SIGTERM (recommended)"
+        echo "  k) Kill -9 (immediate, no flush)"
+        echo "  c) Cancel"
+        read -r -p "  Choose [s/k/c] (default: s): " resp
+        resp="${resp:-s}"
+        case "$resp" in
+            s|S)
+                kill -TERM $running_pids 2>/dev/null || true
+                echo -e "${BLUE}Sent SIGTERM — waiting for graceful shutdown…${NC}"
+                if ! _wait_port_free 20; then
+                    echo -e "${YELLOW}Still running after 20s — force killing.${NC}"
+                    kill -9 $running_pids 2>/dev/null || true
+                    sleep 1
+                fi
+                ;;
+            k|K)
+                kill -9 $running_pids 2>/dev/null || true
+                echo -e "${GREEN}Killed running server.${NC}"
+                sleep 1
+                ;;
+            *)
+                echo "Cancelled."
+                return 1
+                ;;
+        esac
+    fi
+
+    # ── Final check. ──
+    if lsof -ti :8742 >/dev/null 2>&1; then
+        echo -e "${RED}Port 8742 is still in use.${NC}"
+        echo "  Free it manually, then re-run ./start.sh:"
+        echo -e "    ${GREEN}lsof -ti :8742 | xargs kill -9${NC}"
+        echo ""
+        return 1
+    fi
+    echo -e "${GREEN}✓ Port 8742 is free.${NC}"
+    echo ""
+    return 0
+}
+
+# Wait up to $1 seconds for port 8742 to be freed. Returns 0 if freed, 1 on timeout.
+_wait_port_free() {
+    local max="$1" waited=0
+    while [ "$waited" -lt "$max" ]; do
+        sleep 1
+        waited=$((waited + 1))
+        if ! lsof -ti :8742 >/dev/null 2>&1; then
+            echo -e "${GREEN}Server stopped and port freed.${NC}"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # --- Main ---
