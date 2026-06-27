@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -74,6 +76,25 @@ class RevisionMemory(BaseModel):
 
 _current_memory: Optional[RevisionMemory] = None
 
+# Coarse lock guarding multi-step read→await→write critical sections on
+# _current_memory and the pending buffer (update_memory_after_chat, digest,
+# flush, reset/unload). Single-reference reads/writes via get/set_current_memory
+# are atomic in asyncio and need no lock; the lock is for sequences that span
+# an await, where another coroutine could mutate mid-flight.
+_memory_lock = asyncio.Lock()
+
+# Pending chat exchanges awaiting LLM digest. Appended to in place
+# (append/clear) so the module reference stays stable across importers.
+_pending_exchanges: list[ChatTurn] = []
+
+# Dirty flag — set whenever memory changes; cleared after a successful Drive sync.
+_memory_dirty: bool = False
+
+# Rolling window of recent raw turns kept in chat_history for immediate
+# conversational context. Long-term signal lives in the digested structured
+# fields (decisions / reviewer_comments / conversation_summary), not here.
+RAW_CHAT_WINDOW_TURNS = 6  # turns (user+assistant pairs) → 12 messages
+
 
 def get_current_memory() -> Optional[RevisionMemory]:
     return _current_memory
@@ -82,6 +103,102 @@ def get_current_memory() -> Optional[RevisionMemory]:
 def set_current_memory(memory: RevisionMemory) -> None:
     global _current_memory
     _current_memory = memory
+
+
+def is_memory_dirty() -> bool:
+    return _memory_dirty
+
+
+async def mark_dirty() -> None:
+    async with _memory_lock:
+        global _memory_dirty
+        _memory_dirty = True
+
+
+async def clear_dirty() -> None:
+    async with _memory_lock:
+        global _memory_dirty
+        _memory_dirty = False
+
+
+def reset_pending() -> None:
+    """Clear the pending digest buffer and dirty flag (used on reset/unload)."""
+    global _memory_dirty
+    _pending_exchanges.clear()
+    _memory_dirty = False
+
+
+# ---------------------------------------------------------------------------
+# Rule-based importance pre-filter (the "C" in the A+C hybrid)
+# ---------------------------------------------------------------------------
+
+# Trivial user acknowledgements — never worth buffering/digesting.
+_TRIVIAL_ACKS = {
+    "ok", "okay", "k", "kk", "thanks", "thank you", "thx", "got it",
+    "sure", "yes", "no", "yep", "yup", "nope", "cool", "great", "nice",
+    "sounds good", "sounds good!", "will do", "understood", "perfect",
+    "awesome", "lol", "haha", "👍", "true",
+}
+
+# Keywords that signal an exchange may carry durable signal worth digesting.
+_IMPORTANT_TRIGGERS = (
+    "remember", "decide", "decision", "important", "note", "let's", "lets",
+    "we should", "we need", "we'll", "update", "change", "status", "response",
+    "reviewer", "figure", "table", "method", "result", "conclusion", "abstract",
+    "rewrite", "revise", "revision", "draft", "address", "fix", "add", "remove",
+    "because", "therefore", "however", "should", "need to", "have to",
+)
+
+_REVIEWER_ID_RE = re.compile(r"\bR\d+", re.IGNORECASE)
+
+
+def _is_important_exchange(
+    user_message: str,
+    assistant_message: str,
+    updated_comments: Optional[list[ReviewerCommentState]] = None,
+) -> bool:
+    """Rule-based pre-filter: True if the exchange may carry durable signal.
+
+    Drops obvious nothing-burgers (trivial acknowledgements) so the LLM digest
+    never runs on them. Conservative — when in doubt, keep (digest can still
+    decide to extract nothing).
+    """
+    if updated_comments:
+        return True
+    u = (user_message or "").strip()
+    if u.lower() in _TRIVIAL_ACKS:
+        return False
+    u_low = u.lower()
+    # Very short user message with no trigger, no reviewer id, no question
+    # → almost certainly an acknowledgement / filler.
+    if (
+        len(u_low) < 12
+        and not any(t in u_low for t in _IMPORTANT_TRIGGERS)
+        and not _REVIEWER_ID_RE.search(u)
+        and "?" not in u
+    ):
+        return False
+    return True
+
+
+def _apply_comment_updates(
+    memory: RevisionMemory,
+    updated_comments: list[ReviewerCommentState],
+    now: str,
+) -> None:
+    comment_map = {c.id: c for c in memory.reviewer_comments}
+    for updated in updated_comments:
+        if updated.id in comment_map:
+            existing = comment_map[updated.id]
+            existing.status = updated.status
+            if updated.response_draft:
+                existing.response_draft = updated.response_draft
+            if updated.notes:
+                existing.notes = updated.notes
+            if updated.status == "resolved" and not existing.resolved_at:
+                existing.resolved_at = now
+        else:
+            memory.reviewer_comments.append(updated)
 
 
 # ---------------------------------------------------------------------------
@@ -146,67 +263,101 @@ async def update_memory_after_chat(
     assistant_message: str,
     updated_comments: list[ReviewerCommentState] = None,
 ) -> None:
-    """Update the in-memory state after a chat turn."""
+    """Buffer a chat exchange for later LLM digest + periodic Drive sync.
+
+    Does NOT upload to Drive — that happens on the periodic sync loop (and on
+    flush). The exchange is:
+      1. rule-pre-filtered (nothing-burgers skipped entirely),
+      2. appended to a pending digest buffer,
+      3. mirrored into a short rolling chat_history window for immediate context,
+      4. written to the local cache (durable across crashes within the sync
+         interval), and the dirty flag is set.
+    """
+    async with _memory_lock:
+        memory = get_current_memory()
+        if memory is None:
+            logger.warning("No active memory to update")
+            return
+
+        if not _is_important_exchange(user_message, assistant_message, updated_comments):
+            logger.debug("Skipping nothing-burger exchange (pre-filter)")
+            return
+
+        now = datetime.now(timezone.utc).isoformat()
+        hostname = os.uname().nodename if hasattr(os, "uname") else "unknown"
+
+        memory.last_updated = now
+        memory.last_computer = hostname
+
+        turn_u = ChatTurn(role="user", content=user_message[:2000], timestamp=now)
+        turn_a = ChatTurn(role="assistant", content=assistant_message[:2000], timestamp=now)
+
+        # Buffer for the LLM digest
+        _pending_exchanges.append(turn_u)
+        _pending_exchanges.append(turn_a)
+
+        # Rolling raw window for immediate conversational context
+        memory.chat_history.append(turn_u)
+        memory.chat_history.append(turn_a)
+        if len(memory.chat_history) > RAW_CHAT_WINDOW_TURNS * 2:
+            memory.chat_history = memory.chat_history[-(RAW_CHAT_WINDOW_TURNS * 2):]
+
+        # Apply any explicit reviewer-comment updates passed in
+        if updated_comments:
+            _apply_comment_updates(memory, updated_comments, now)
+
+        global _memory_dirty
+        _memory_dirty = True
+
+        # Durable locally immediately (fast filesystem write)
+        _save_local(memory)
+
+
+async def flush_memory() -> None:
+    """Digest pending exchanges and upload memory to Drive once. Best-effort.
+
+    Called by the periodic sync loop, on /reset, /unload-project, and shutdown.
+    Never raises — a Drive hiccup must not block a reset.
+
+    Only clears the dirty flag if the pending buffer is fully drained. If the
+    digest failed (LLM/parse error) and pending is retained, dirty stays set
+    so the periodic loop retries — no orphaned, never-digested exchanges.
+    """
+    # Digest first (releases the lock during the LLM call).
+    try:
+        from memory_digest import digest_pending_exchanges
+
+        await digest_pending_exchanges()
+    except Exception as exc:
+        logger.warning("flush_memory: digest failed (non-fatal): %s", exc)
+
     memory = get_current_memory()
-    if memory is None:
-        logger.warning("No active memory to update")
-        return
-
-    now = datetime.now(timezone.utc).isoformat()
-    hostname = os.uname().nodename if hasattr(os, "uname") else "unknown"
-
-    memory.last_updated = now
-    memory.last_computer = hostname
-
-    # Add chat turns
-    memory.chat_history.append(
-        ChatTurn(role="user", content=user_message[:2000], timestamp=now)
-    )
-    memory.chat_history.append(
-        ChatTurn(role="assistant", content=assistant_message[:2000], timestamp=now)
-    )
-
-    # Trim history
-    from config import CHAT_HISTORY_LIMIT
-
-    if len(memory.chat_history) > CHAT_HISTORY_LIMIT * 2:
-        memory.chat_history = memory.chat_history[-(CHAT_HISTORY_LIMIT * 2):]
-
-    # Update conversation summary (simple: use the user's last message as context)
-    memory.conversation_summary = (
-        f"Last discussed: {user_message[:300]}\n"
-        f"Last response summary: {assistant_message[:300]}"
-    )
-
-    # Update reviewer comments if provided
-    if updated_comments:
-        comment_map = {c.id: c for c in memory.reviewer_comments}
-        for updated in updated_comments:
-            if updated.id in comment_map:
-                # Merge updates
-                existing = comment_map[updated.id]
-                existing.status = updated.status
-                if updated.response_draft:
-                    existing.response_draft = updated.response_draft
-                if updated.notes:
-                    existing.notes = updated.notes
-                if updated.status == "resolved" and not existing.resolved_at:
-                    existing.resolved_at = now
-            else:
-                memory.reviewer_comments.append(updated)
-
-    # Save locally (fast — local filesystem)
-    _save_local(memory)
-
-    # Sync to Google Drive for cross-computer resume.
-    # Runs in a thread pool so the event loop stays responsive.
-    if memory.project_folder_id:
+    if memory is not None and memory.project_folder_id:
         try:
             from drive_sync import _save_memory_to_drive
+
             await _save_memory_to_drive(memory.project_folder_id, memory.model_dump())
-            logger.info("Synced memory to Drive folder %s", memory.project_folder_id)
+            logger.info("Memory synced to Drive (flush)")
         except Exception as exc:
-            logger.warning("Failed to sync memory to Drive (non-fatal): %s", exc)
+            logger.warning("flush_memory: Drive sync failed (non-fatal): %s", exc)
+
+    # Clear dirty only when pending is drained; otherwise keep it set so the
+    # loop retries the digest.
+    if len(_pending_exchanges) == 0:
+        await clear_dirty()
+
+
+async def flush_memory_if_dirty() -> bool:
+    """Flush (digest + sync) only if there's unsaved work.
+
+    Returns True if a flush ran, False if there was nothing to save (buffer
+    clean → caller can restart instantly with no Drive call). Used by Restart
+    so an empty buffer doesn't pay a Drive round-trip.
+    """
+    if not is_memory_dirty():
+        return False
+    await flush_memory()
+    return True
 
 
 def update_paper_sections(sections: list[dict]) -> None:

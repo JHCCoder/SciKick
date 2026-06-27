@@ -444,7 +444,10 @@ async def _save_memory_to_drive(folder_id: str, memory: dict) -> None:
     )
 
     existing = response.get("files", [])
-    upload = MediaIoBaseUpload(media, mimetype="application/json", resumable=True)
+    # Simple (non-resumable) upload — the memory file is a tiny JSON blob
+    # (a few KB). Resumable uploads add pointless round-trips/overhead
+    # designed for large media; pointless here.
+    upload = MediaIoBaseUpload(media, mimetype="application/json", resumable=False)
 
     if existing:
         await _run_in_thread(

@@ -559,22 +559,8 @@ async function sendMessage() {
       }
     }
 
-    // Update memory after the exchange.
-    // Set loadingInProgress to prevent the health check from flashing
-    // "disconnected" while the Drive sync completes (can take 2-5s).
-    loadingInProgress = true;
-    try {
-      await fetch(`${SERVER_URL}/memory/update`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          user_message: text,
-          assistant_message: fullResponse,
-        }),
-      });
-    } finally {
-      loadingInProgress = false;
-    }
+    // Memory is now persisted server-side on stream completion (the /send
+    // path is self-contained), so no follow-up /memory/update is needed here.
 
     // Refresh context usage
     updateContextUsage();
@@ -806,9 +792,12 @@ dom.btnConnect.addEventListener("click", connect);
 dom.btnPower.addEventListener("click", async () => {
   dom.btnPower.classList.add("spinning");
 
+  let memoryFlushed = false;
   if (serverConnected) {
     try {
-      await fetch(`${SERVER_URL}/chat/reset`, { method: "POST" });
+      const res = await fetch(`${SERVER_URL}/chat/reset`, { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      memoryFlushed = !!data.memory_flushed;
     } catch (e) { /* ignore */ }
   }
 
@@ -821,6 +810,12 @@ dom.btnPower.addEventListener("click", async () => {
 
   // Wipe chat
   dom.messages.innerHTML = "";
+
+  // If important points from the session were just digested + saved, let the
+  // user know (only when something was actually saved — empty buffer restarts silently).
+  if (memoryFlushed) {
+    addMessage("system", "💾 Saved the important points from this session to memory. Starting fresh.");
+  }
 
   // Reset session focus so onboarding options reappear
   sessionFocus = null;

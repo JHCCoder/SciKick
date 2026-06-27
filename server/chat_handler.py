@@ -7,6 +7,7 @@ Supported providers:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -36,6 +37,13 @@ router = APIRouter()
 # ---------------------------------------------------------------------------
 # Global state for the current project
 # ---------------------------------------------------------------------------
+
+# Coarse lock guarding mutations of the project-state globals below
+# (reset / unload / load-project reassignments). One lock for the whole bundle
+# — coarse by design to avoid deadlocks. Chat send paths don't mutate these
+# (they only read), so they don't take it; their memory write goes through
+# memory_manager._memory_lock instead.
+_state_lock = asyncio.Lock()
 
 _current_doc: Optional[PaperDocument] = None
 _current_comments: list[ReviewerComment] = []
@@ -144,8 +152,8 @@ You are the chat interface of a desktop application called **scikick**. Understa
 3. **LLM backend** — that's you, providing the intelligence via API
 
 **What the app does automatically (the researcher doesn't need to ask for this):**
-- **Memory is saved after every exchange** — the server writes a `.scikick_memory.json` file to the researcher's Google Drive folder after each of your responses. This file contains the full chat history, reviewer comment statuses, and decisions
-- **Cross-computer resume** — if the researcher opens the app on another computer with the same Drive folder, the server downloads the memory file and restores all context. The researcher picks up exactly where they left off
+- **Important content is saved, not every word** — after each exchange, the server buffers the conversation locally. Trivial exchanges (acknowledgements like "ok"/"thanks") are ignored. Periodically (about every two minutes, and when the session closes), an LLM digest distils the substantive exchanges into structured memory: decisions made, reviewer-comment status changes, key facts, and a short recap. That structured memory — not the raw back-and-forth — is written to a `.scikick_memory.json` file in the researcher's Google Drive folder. Only a short rolling window of recent messages is kept verbatim for immediate context; older chatter is replaced by the distilled summary.
+- **Cross-computer resume** — if the researcher opens the app on another computer with the same Drive folder, the server downloads the memory file and restores the structured context (decisions, reviewer-comment states, key facts, recap). They pick up where they left off, though the full word-for-word history of past sessions is not retained — only what was distilled.
 - **Manuscript stays loaded** — once the researcher clicks "Load Project," the server downloads their manuscript and comments from Drive and keeps them in context for the entire session (no need to re-paste)
 
 **What the researcher controls:**
@@ -154,8 +162,8 @@ You are the chat interface of a desktop application called **scikick**. Understa
 - **When to load/reload** — clicking "Load Project" downloads the latest files from Drive
 
 **If the researcher asks about these features:**
-- "Can you save this?" / "Do you remember this?" → Explain that the app automatically saves every conversation to their Drive folder as `.scikick_memory.json`, so all progress is persisted
-- "Will this be here if I switch computers?" → Yes — the memory file syncs via Google Drive. On any new computer, they just clone the repo, run `./start.sh --setup`, and paste the same Drive folder ID
+- "Can you save this?" / "Do you remember this?" → Explain that the app automatically distils important points from the conversation (decisions, reviewer-comment updates, key facts) into a `.scikick_memory.json` file on their Drive folder. Trivial chatter isn't kept, but anything substantive is. Tell them the safe way to make sure something is remembered is to state it as a clear decision or fact.
+- "Will this be here if I switch computers?" → Yes — the distilled memory syncs to Google Drive. On any new computer, they clone the repo, run `./start.sh --setup`, and paste the same Drive folder ID. The structured context is restored, though not the verbatim history of prior sessions.
 - "How do I change the model?" → They can click the ⚙ gear icon in the extension's top bar to switch providers and models immediately
 """
 
@@ -705,6 +713,41 @@ def _get_provider() -> dict:
 # Routes
 # ---------------------------------------------------------------------------
 
+async def _stream_with_memory_save(
+    stream: AsyncGenerator[str, None], user_message: str
+) -> AsyncGenerator[str, None]:
+    """Wrap a provider stream so the completed exchange is buffered to memory.
+
+    Makes the streaming `/send` path self-contained: memory is persisted
+    server-side on successful completion, with no dependence on a follow-up
+    /memory/update request from the client. Forwards every SSE event
+    unchanged; only acts on stream completion (and only if no error event
+    was emitted).
+    """
+    accumulated: list[str] = []
+    had_error = False
+    async for payload in stream:
+        yield payload
+        if isinstance(payload, str) and payload.startswith("data: "):
+            try:
+                evt = json.loads(payload[len("data: "):].strip())
+            except (json.JSONDecodeError, ValueError):
+                continue
+            etype = evt.get("type")
+            if etype == "text":
+                accumulated.append(evt.get("content", ""))
+            elif etype == "error":
+                had_error = True
+
+    if had_error or not accumulated:
+        return
+
+    try:
+        await update_memory_after_chat(user_message, "".join(accumulated))
+    except Exception as exc:
+        logger.warning("Streaming memory save failed (non-fatal): %s", exc)
+
+
 @router.post("/send")
 async def send_message(req: ChatRequest):
     """Send a message to the revision assistant (streaming SSE)."""
@@ -751,6 +794,10 @@ async def send_message(req: ChatRequest):
             provider["api_key"],
             provider["base_url"],
         )
+
+    # Wrap so the exchange is buffered to memory on successful completion
+    # (self-contained — no client follow-up needed).
+    stream = _stream_with_memory_save(stream, req.message)
 
     return StreamingResponse(
         stream,
@@ -1183,29 +1230,45 @@ async def reset_all_state():
     global _focused_file_cache
     global _project_file_index
 
-    from memory_manager import get_current_memory, set_current_memory
+    from memory_manager import (
+        get_current_memory,
+        set_current_memory,
+        flush_memory_if_dirty,
+        reset_pending,
+    )
 
-    # Track what we're clearing for the response
-    existing_memory = get_current_memory()
-    had_paper = _current_doc is not None
-    had_comments = len(_current_comments)
-    had_scraped = len(_scraped_docs)
-    had_memory = existing_memory is not None
+    memory_flushed = False
+    async with _state_lock:
+        # Track what we're clearing for the response
+        existing_memory = get_current_memory()
+        had_paper = _current_doc is not None
+        had_comments = len(_current_comments)
+        had_scraped = len(_scraped_docs)
+        had_memory = existing_memory is not None
 
-    _current_doc = None
-    _current_comments = []
-    _image_cache = {}
-    _current_doc_source = ""
-    _scraped_docs = []
-    _scraped_sources = []
-    _focused_file_cache = {}
-    _project_file_index = {}
+        # Flush pending chat exchanges to Drive before wiping — but only if
+        # there's unsaved work, so an empty buffer restarts instantly with
+        # no Drive round-trip.
+        if existing_memory is not None:
+            try:
+                memory_flushed = await flush_memory_if_dirty()
+            except Exception as exc:
+                logger.warning("reset: memory flush failed (non-fatal): %s", exc)
+            set_current_memory(None)
+        reset_pending()
 
-    if existing_memory is not None:
-        set_current_memory(None)
+        _current_doc = None
+        _current_comments = []
+        _image_cache = {}
+        _current_doc_source = ""
+        _scraped_docs = []
+        _scraped_sources = []
+        _focused_file_cache = {}
+        _project_file_index = {}
 
     return {
         "status": "reset",
+        "memory_flushed": memory_flushed,
         "cleared": {
             "manuscript": had_paper,
             "comments": had_comments,
@@ -1226,25 +1289,40 @@ async def unload_project():
     global _focused_file_cache
     global _project_file_index
 
-    from memory_manager import get_current_memory, set_current_memory
+    from memory_manager import (
+        get_current_memory,
+        set_current_memory,
+        flush_memory_if_dirty,
+        reset_pending,
+    )
 
-    existing_memory = get_current_memory()
-    had_paper = _current_doc is not None
-    had_comments = len(_current_comments)
-    had_memory = existing_memory is not None
+    memory_flushed = False
+    async with _state_lock:
+        existing_memory = get_current_memory()
+        had_paper = _current_doc is not None
+        had_comments = len(_current_comments)
+        had_memory = existing_memory is not None
 
-    _current_doc = None
-    _current_comments = []
-    _image_cache = {}
-    _focused_file_cache = {}
-    _current_doc_source = ""
-    _project_file_index = {}
+        # Flush pending exchanges to Drive before dropping the project context
+        # — only if there's unsaved work.
+        if existing_memory is not None:
+            try:
+                memory_flushed = await flush_memory_if_dirty()
+            except Exception as exc:
+                logger.warning("unload-project: memory flush failed (non-fatal): %s", exc)
+            set_current_memory(None)
+        reset_pending()
 
-    if existing_memory is not None:
-        set_current_memory(None)
+        _current_doc = None
+        _current_comments = []
+        _image_cache = {}
+        _focused_file_cache = {}
+        _current_doc_source = ""
+        _project_file_index = {}
 
     return {
         "status": "unloaded",
+        "memory_flushed": memory_flushed,
         "cleared": {
             "manuscript": had_paper,
             "comments": had_comments,
