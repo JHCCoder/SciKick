@@ -936,7 +936,7 @@ async def list_providers():
                 "id": "deepseek",
                 "name": "DeepSeek",
                 "sdk": "OpenAI-compatible",
-                "models": "deepseek-chat, deepseek-reasoner",
+                "models": "deepseek-v4-pro, deepseek-v4-flash",
                 "env_vars": "LLM_API_KEY or DEEPSEEK_API_KEY",
             },
             {
@@ -972,8 +972,6 @@ async def list_providers():
 MODEL_CONTEXT_WINDOWS = {
     "deepseek-v4-pro": 1048576,
     "deepseek-v4-flash": 1048576,
-    "deepseek-chat": 131072,
-    "deepseek-reasoner": 65536,
     "glm-4-plus": 131072,
     "glm-4-flash": 131072,
     "glm-4-long": 1048576,
