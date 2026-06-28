@@ -36,3 +36,6 @@ Thumbs.db
 code_log.txt
 screenshots-for-usage/
 *.zip
+
+# AI-generated images
+Gemini_Generated_Image_*
