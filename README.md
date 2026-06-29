@@ -65,12 +65,14 @@ Chrome Extension (side panel) ↔ Local Server (localhost:8742) ↔ Google Drive
 | Provider | Get API key at | Default model |
 |----------|---------------|---------------|
 | **Anthropic (Claude)** | [console.anthropic.com](https://console.anthropic.com/) | `claude-sonnet-4-6` |
-| **DeepSeek** | [platform.deepseek.com](https://platform.deepseek.com/) | `deepseek-chat` |
+| **DeepSeek** | [platform.deepseek.com](https://platform.deepseek.com/) | `deepseek-v4-pro` |
 | **Zhipu AI (GLM)** | [open.bigmodel.cn](https://open.bigmodel.cn/) | `glm-4-plus` |
 | **OpenAI (GPT-4o)** | [platform.openai.com](https://platform.openai.com/) | `gpt-4o` |
-| **Custom** (Ollama, Groq, Together, etc.) | Your provider | Any |
+| **Custom** (Groq, Together, etc.) | Your provider | Any |
 
 > 💡 Want support for a specific AI provider? Open an issue or start a discussion on GitHub — we can usually add it quickly.
+>
+> 🏠 **Local LLMs (e.g. Ollama, LM Studio) are not officially supported yet** — SciKick currently talks to hosted LLM APIs. A dedicated local-LLLM mode is on the roadmap. In the meantime, the **Custom** provider can be pointed at any OpenAI-compatible endpoint, but this is untested and requires a dummy API key.
 
 ### 1. Get the code
 
@@ -245,7 +247,7 @@ Same as above — clone the code, run `./start.sh --setup` on the new machine (y
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LLM_PROVIDER` | `anthropic` | Provider: `anthropic`, `deepseek`, `openai`, or `custom` |
+| `LLM_PROVIDER` | `anthropic` | Provider: `anthropic`, `deepseek`, `glm`, `openai`, or `custom` |
 | `LLM_API_KEY` | (required) | Your API key |
 | `LLM_MODEL` | (provider default) | Model name override |
 | `LLM_BASE_URL` | (provider default) | Base URL for custom providers |
