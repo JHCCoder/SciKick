@@ -5,6 +5,7 @@
   "description": "AI research companion for brainstorming, scientific writing, and chatting with your papers.",
   "permissions": ["sidePanel", "storage", "tabs", "activeTab", "scripting"],
   "host_permissions": ["http://localhost:8742/*"],
+  "optional_host_permissions": ["*://*/*"],
   "side_panel": {
     "default_path": "sidepanel.html"
   },
