@@ -184,9 +184,19 @@ def _exchange_token_for_changed_scope(flow, code: str) -> None:
 
 @router.get("/auth/status")
 async def auth_status():
-    """Check whether we have valid Google credentials."""
+    """Check whether we have valid Google credentials.
+
+    ``credentials_present`` reports whether the OAuth client-secrets file
+    exists (the Google Cloud setup step); ``authenticated`` reports whether a
+    usable token is on disk. The extension uses the difference to show the
+    right onboarding prompt: missing creds → run ``./start.sh --drive``;
+    missing token → trigger the in-browser OAuth consent via /drive/auth/url.
+    """
     creds = _load_credentials()
-    return {"authenticated": creds is not None}
+    return {
+        "authenticated": creds is not None,
+        "credentials_present": Path(GOOGLE_CREDENTIALS_FILE).exists(),
+    }
 
 
 # ---------------------------------------------------------------------------
