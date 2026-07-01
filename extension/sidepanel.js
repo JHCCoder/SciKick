@@ -1350,25 +1350,11 @@ function initTabBar() {
       showSystemMessage(`🔍 Scraping paper from ${new URL(scrapeUrl).hostname}...`);
 
       try {
-        // Reading any web page requires host permission. We keep it OPTIONAL
-        // (not in host_permissions) so the install listing stays clean and
-        // existing users aren't force-re-approved, then request the broad
-        // grant once on first scrape inside this click gesture. After that
-        // Chrome remembers it and no further prompts appear. Reload the
-        // extension after changing the manifest.
-        const hasHost = await chrome.permissions.contains({ origins: ["*://*/*"] });
-        if (!hasHost) {
-          const granted = await chrome.permissions.request({ origins: ["*://*/*"] });
-          if (!granted) {
-            throw new Error(
-              "Scrape needs permission to read the page you're viewing. " +
-              "Click \"Scrape this page\" again and choose Allow on the prompt."
-            );
-          }
-        }
-
         // Extract the page HTML from the active tab using the user's
         // authenticated browser session (avoids 403 on journal sites).
+        // Host access for all sites is declared as a REQUIRED permission
+        // in the manifest (<all_urls>), granted at install time — no
+        // runtime permission prompt is needed here.
         const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
         if (!tab || !tab.id) throw new Error("No active tab found");
 
