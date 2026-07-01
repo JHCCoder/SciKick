@@ -171,7 +171,13 @@ body {
   border-radius: 3px;
   font-family: var(--font-mono);
 }
-#startup-command {
+.cmd-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin: 8px 0 2px;
+}
+.startup-command {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -181,7 +187,7 @@ body {
   border: 1px solid var(--border);
   border-radius: 6px;
 }
-#startup-command code {
+.startup-command code {
   flex: 1;
   font-size: 12px;
   word-break: break-all;
@@ -189,7 +195,7 @@ body {
   padding: 0;
   color: var(--accent);
 }
-#btn-copy-cmd {
+.btn-copy-cmd {
   background: none;
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -199,7 +205,7 @@ body {
   font-size: 14px;
   flex-shrink: 0;
 }
-#btn-copy-cmd:hover {
+.btn-copy-cmd:hover {
   background: var(--bg-tertiary);
   color: var(--text-primary);
 }
@@ -207,6 +213,14 @@ body {
   font-size: 12px;
   color: var(--text-secondary);
   margin-top: 6px;
+}
+.ds-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.ds-actions .btn-primary.hidden {
+  display: none;
 }
 
 /* --- Settings Panel (warm orange theme) --- */
@@ -790,6 +804,11 @@ body {
 }
 #context-hint.hidden { display: none; }
 #context-hint strong { color: var(--accent); }
+#context-hint.config-nudge {
+  cursor: pointer;
+  color: var(--text-primary, inherit);
+  border: 1px solid var(--accent, #facb01);
+}
 
 #input-row {
   display: flex;

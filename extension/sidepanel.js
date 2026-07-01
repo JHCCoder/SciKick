@@ -16,11 +16,14 @@ const HEALTH_FAIL_THRESHOLD = 2; // Consecutive failures before showing disconne
 // ---------------------------------------------------------------------------
 
 let serverConnected = false;
+let everConnected = false; // has the panel ever reached the server? (drives first-run vs reconnect banner)
 let projectLoaded = false;
 let projectFiles = []; // {id, name, mimeType} — files in the loaded project
 let projectFolderId = null; // Drive folder ID of the loaded project
 let viewingFile = null; // {name, id} — project file currently open in a browser tab
 let currentTabUrl = null; // URL of the currently active browser tab
+let currentDriveFolderId = null; // Drive folder id on the active tab, if loadable (else null)
+let driveReady = false; // last known /drive/auth/status authenticated value
 let sessionFocus = null; // "brainstorming" | "paper_discussion" | "paper_writing" | "revision" | "other"
 let currentStream = null; // AbortController for SSE
 let loadingInProgress = false; // true during loadProject / scrape — suppress disconnect banner
@@ -49,8 +52,12 @@ const dom = {
   btnClear: $("#btn-clear"),
   btnPower: $("#btn-power"),
   btnConnect: $("#btn-connect"),
-  btnCopyCmd: $("#btn-copy-cmd"),
-  cmdText: $("#cmd-text"),
+  firstrunInstall: $("#firstrun-install"),
+  firstrunReconnect: $("#firstrun-reconnect"),
+  // Drive setup banner
+  driveSetupBanner: $("#drive-setup-banner"),
+  btnDriveConnect: $("#btn-drive-connect"),
+  btnDriveRecheck: $("#btn-drive-recheck"),
   // Settings
   btnSettings: $("#btn-settings"),
   settingsPanel: $("#settings-panel"),
@@ -131,6 +138,14 @@ function setServerStatus(status) {
     dom.chatInput.disabled = false;
     dom.btnSend.disabled = false;
 
+    // First successful contact — remember it so future disconnects show the
+    // "reconnect" banner (service hint) instead of the first-run "clone +
+    // ./start.sh" banner.
+    if (!everConnected) {
+      everConnected = true;
+      chrome.storage.local.set({ everConnected: true });
+    }
+
     // Server just came back — in-memory state was wiped on restart.
     // Reset client-side project state and refresh the info panel.
     if (!wasConnected) {
@@ -142,13 +157,21 @@ function setServerStatus(status) {
       if (!dom.infoPanel.classList.contains("hidden")) {
         loadInfoPanel();
       }
+      // Re-check Drive readiness for the current tab now that the server is up.
+      checkDriveStatus();
     }
   } else {
     dom.connectBanner.style.display = "block";
+    // First-run (never connected): show clone + ./start.sh. Otherwise the
+    // shorter reconnect hint (background service / Desktop-Documents caveat).
+    dom.firstrunInstall.classList.toggle("hidden", everConnected);
+    dom.firstrunReconnect.classList.toggle("hidden", !everConnected);
     dom.driveInput.disabled = true;
     dom.btnLoad.disabled = true;
     dom.chatInput.disabled = true;
     dom.btnSend.disabled = true;
+    // No server → can't check Drive status; hide the Drive setup banner.
+    dom.driveSetupBanner.style.display = "none";
 
     // Server went down — update info panel if open
     if (!dom.infoPanel.classList.contains("hidden")) {
@@ -168,7 +191,56 @@ async function connect() {
     if (!sessionFocus) showOnboardingOptions();
     // Check for existing session
     await checkExistingSession();
+    // Re-check Drive readiness now that the server is up (the current tab
+    // may be a Drive folder waiting on the setup banner).
+    checkDriveStatus();
   }
+}
+
+// --- Contextual Google Drive onboarding ---
+// When the active tab is a Drive folder but Drive isn't ready, show a banner
+// telling the user how to fix it: ./start.sh --drive if the credentials file
+// is missing, or a "Connect Google Drive" button (browser OAuth) if only the
+// token is missing. Once authenticated, the usual "Use this folder" button
+// appears.
+async function checkDriveStatus() {
+  if (!serverConnected) {
+    dom.driveSetupBanner.style.display = "none";
+    return;
+  }
+  try {
+    const res = await fetch(`${SERVER_URL}/drive/auth/status`);
+    if (!res.ok) return;
+    const data = await res.json();
+    driveReady = !!data.authenticated;
+    applyDriveStatus(data);
+  } catch {
+    // Transient network blip — leave the banner as-is.
+  }
+}
+
+function applyDriveStatus(data) {
+  // Only prompt when actually on a loadable Drive folder.
+  if (!currentDriveFolderId) {
+    dom.driveSetupBanner.style.display = "none";
+    return;
+  }
+  if (data.authenticated) {
+    dom.driveSetupBanner.style.display = "none";
+    dom.btnUseTab.classList.remove("hidden");
+    dom.btnUseTab.textContent = "Use this folder";
+    return;
+  }
+  // Not ready — show the banner, hide the Load button.
+  dom.btnUseTab.classList.add("hidden");
+  dom.driveSetupBanner.style.display = "block";
+  const credsMissing = !data.credentials_present;
+  document.querySelector('.ds-state[data-state="creds"]')
+    .classList.toggle("hidden", !credsMissing);
+  document.querySelector('.ds-state[data-state="token"]')
+    .classList.toggle("hidden", credsMissing);
+  // The "Connect Google Drive" button only applies to the token-missing state.
+  dom.btnDriveConnect.classList.toggle("hidden", credsMissing);
 }
 
 async function showProviderInfo() {
@@ -177,13 +249,31 @@ async function showProviderInfo() {
     if (res.ok) {
       const data = await res.json();
       if (data.current && data.current.configured) {
-        dom.contextHint.innerHTML = `🧠 <strong>${escHtml(data.current.provider)}</strong> / ${escHtml(data.current.model)}`;
-        dom.contextHint.classList.remove("hidden");
+        showProviderHint(data.current.provider, data.current.model);
+      } else {
+        // No LLM configured yet — nudge the user to ⚙ Settings instead of
+        // letting them discover it via a failed first chat.
+        showConfigNudge();
       }
     }
   } catch (e) {
     // Provider info not critical
   }
+}
+
+function showProviderHint(provider, model) {
+  // Show just the connected model — the provider label (esp. "Others")
+  // isn't useful in the status bar; the model name is what matters.
+  dom.contextHint.innerHTML = `🧠 <strong>${escHtml(model)}</strong>`;
+  dom.contextHint.classList.remove("hidden", "config-nudge");
+  dom.contextHint.onclick = null;
+}
+
+function showConfigNudge() {
+  dom.contextHint.innerHTML = `⚙ <strong>No LLM configured</strong> — click to enter your API key`;
+  dom.contextHint.classList.remove("hidden");
+  dom.contextHint.classList.add("config-nudge");
+  dom.contextHint.onclick = openSettings;
 }
 
 // ---------------------------------------------------------------------------
@@ -261,10 +351,9 @@ async function saveSettings() {
       const data = await res.json();
       dom.cfgStatus.textContent = "✓ Applied";
       dom.cfgStatus.className = "";
-      // Update the context hint
+      // Update the context hint (clears the config nudge if it was shown)
       if (data.current) {
-        dom.contextHint.innerHTML = `🧠 <strong>${escHtml(data.current.provider)}</strong> / ${escHtml(data.current.model)}`;
-        dom.contextHint.classList.remove("hidden");
+        showProviderHint(data.current.provider, data.current.model);
       }
       // Clear the API key field for security
       dom.cfgApiKey.value = "";
@@ -788,6 +877,15 @@ dom.btnClear.addEventListener("click", () => {
 
 dom.btnConnect.addEventListener("click", connect);
 
+// Drive setup banner: re-check status after the user runs ./start.sh --drive
+// or completes the browser OAuth consent.
+dom.btnDriveRecheck.addEventListener("click", checkDriveStatus);
+dom.btnDriveConnect.addEventListener("click", () => {
+  // Opens the server's OAuth consent URL in a new tab. The user approves,
+  // the server saves the token, then they click "Check again".
+  chrome.tabs.create({ url: `${SERVER_URL}/drive/auth/url` });
+});
+
 // Restart session — wipe server state, chat, and re-show onboarding
 dom.btnPower.addEventListener("click", async () => {
   dom.btnPower.classList.add("spinning");
@@ -1243,6 +1341,10 @@ function updateTabBar(tab) {
 
   // Default: hide project bar — only show for Drive folders
   dom.projectBar.classList.add("hidden");
+  // Default: not on a loadable Drive folder; checkDriveStatus() re-shows the
+  // banner only when we actually land on one.
+  currentDriveFolderId = null;
+  dom.driveSetupBanner.style.display = "none";
 
   // Check for Google Drive URLs
   const driveInfo = parseDriveUrl(tab.url);
@@ -1263,10 +1365,19 @@ function updateTabBar(tab) {
       } else {
         dom.tabTitle.textContent = tab.title || "Untitled";
         dom.tabBar.classList.remove("viewing-project-file");
-        dom.btnUseTab.classList.remove("hidden");
-        dom.btnUseTab.textContent = "Use this folder";
         delete dom.btnUseTab.dataset.scrapeUrl;
         dom.btnUseTab.dataset.folderId = driveInfo.id;
+        currentDriveFolderId = driveInfo.id;
+        // "Use this folder" only appears once Drive is ready; until then
+        // checkDriveStatus() shows the setup banner with ./start.sh --drive
+        // or a Connect button.
+        if (driveReady) {
+          dom.btnUseTab.classList.remove("hidden");
+          dom.btnUseTab.textContent = "Use this folder";
+        } else {
+          dom.btnUseTab.classList.add("hidden");
+        }
+        checkDriveStatus();
       }
     } else {
       // It's a Drive file — check if it belongs to the loaded project
@@ -1439,26 +1550,26 @@ fixViewportHeight();
 window.addEventListener("resize", fixViewportHeight);
 
 async function init() {
-  // Show the command to start the server.
-  // chrome.runtime.getURL() returns an internal chrome-extension:// URL,
-  // not a filesystem path, so we can't derive the real project directory.
-  // The user should run this from the project root.
-  const startCmd = `cd SciKick && ./start.sh`;
-  dom.cmdText.textContent = startCmd;
-
-  // Wire up the copy button
-  dom.btnCopyCmd.addEventListener("click", () => {
-    navigator.clipboard.writeText(startCmd).then(() => {
-      dom.btnCopyCmd.textContent = "✓";
-      setTimeout(() => { dom.btnCopyCmd.textContent = "📋"; }, 2000);
+  // Wire up every copy button on the page (first-run banner has two command
+  // rows; the Drive setup banner has one). Each button copies its sibling
+  // <code class="cmd-text"> and flashes ✓ briefly.
+  document.querySelectorAll(".btn-copy-cmd").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const code = btn.parentElement.querySelector(".cmd-text");
+      if (!code) return;
+      navigator.clipboard.writeText(code.textContent).then(() => {
+        btn.textContent = "✓";
+        setTimeout(() => { btn.textContent = "📋"; }, 2000);
+      });
     });
   });
 
   // Load saved settings
-  const stored = await chrome.storage.local.get(["driveFolderId", "theme"]);
+  const stored = await chrome.storage.local.get(["driveFolderId", "theme", "everConnected"]);
   if (stored.driveFolderId) {
     dom.driveInput.value = stored.driveFolderId;
   }
+  everConnected = !!stored.everConnected;
 
   // Apply saved theme (before first paint — but we're already in init)
   loadTheme();
