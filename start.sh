@@ -4,13 +4,15 @@
 # Usage:
 #   ./start.sh                    # Start the server
 #   ./start.sh --install          # Install dependencies first, then start
-#   ./start.sh --setup            # First-time setup wizard
+#   ./start.sh --setup            # First-time setup wizard (Google Drive + service)
 #
 # Requirements:
 #   - Python 3.10+
 #   - Chrome/Chromium browser (for the extension)
 #   - Google Cloud project with Drive API enabled (for Google Drive access)
-#   - Anthropic API key
+#
+# The LLM API key is NOT required up front — the server boots keyless and you
+# configure your provider/key in the extension's ⚙ Settings panel on first run.
 
 set -euo pipefail
 
@@ -464,127 +466,10 @@ except Exception as e:
 first_time_setup() {
     echo -e "${YELLOW}scikick Setup Wizard${NC}"
     echo ""
-
-    # Check if LLM is already configured (has .env with API key)
-    SKIP_LLM=false
-    ENV_FILE="$SCRIPT_DIR/.env"
-    if [ -f "$ENV_FILE" ] && grep -qE '^LLM_API_KEY=.+' "$ENV_FILE" 2>/dev/null; then
-        source "$ENV_FILE"
-        echo -e "${GREEN}✓ LLM already configured (${LLM_PROVIDER:-unknown} / ${LLM_MODEL:-default})${NC}"
-        echo ""
-        read -r -p "Reconfigure LLM? [y/N]: " resp
-        if [ "$resp" != "y" ] && [ "$resp" != "Y" ]; then
-            SKIP_LLM=true
-            echo "  Skipping LLM setup — jumping to Google Drive."
-            echo ""
-        fi
-    fi
-
-    if [ "$SKIP_LLM" = false ]; then
-
-    # --- Choose LLM provider ---
-    echo -e "${YELLOW}Which LLM provider will you use?${NC}"
-    echo "  1) Anthropic (Claude)  — https://console.anthropic.com/"
-    echo "  2) DeepSeek             — https://platform.deepseek.com/"
-    echo "  3) Zhipu AI (GLM)       — https://open.bigmodel.cn/"
-    echo "  4) OpenAI (GPT-4o)      — https://platform.openai.com/"
-    echo "  5) Custom (OpenAI-compatible — Ollama, Groq, Together, etc.)"
+    echo "  This wizard sets up Google Drive access and the optional background"
+    echo "  service. Your LLM provider and API key are configured later in the"
+    echo "  extension's ⚙ Settings panel — no terminal needed."
     echo ""
-    read -r -p "Enter choice [1-5] (default: 1): " provider_choice
-    provider_choice="${provider_choice:-1}"
-
-    case "$provider_choice" in
-        1)
-            LLM_PROVIDER="anthropic"
-            DEFAULT_MODEL="claude-sonnet-4-6"
-            echo -e "${GREEN}Selected: Anthropic (Claude)${NC}"
-            echo "Get your API key at: https://console.anthropic.com/"
-            ;;
-        2)
-            LLM_PROVIDER="deepseek"
-            DEFAULT_MODEL="deepseek-chat"
-            echo -e "${GREEN}Selected: DeepSeek${NC}"
-            echo "Get your API key at: https://platform.deepseek.com/"
-            ;;
-        3)
-            LLM_PROVIDER="glm"
-            DEFAULT_MODEL="glm-4-plus"
-            echo -e "${GREEN}Selected: Zhipu AI (GLM)${NC}"
-            echo "Get your API key at: https://open.bigmodel.cn/"
-            ;;
-        4)
-            LLM_PROVIDER="openai"
-            DEFAULT_MODEL="gpt-4o"
-            echo -e "${GREEN}Selected: OpenAI${NC}"
-            echo "Get your API key at: https://platform.openai.com/"
-            ;;
-        5)
-            LLM_PROVIDER="custom"
-            DEFAULT_MODEL=""
-            echo -e "${GREEN}Selected: Custom (OpenAI-compatible)${NC}"
-            echo ""
-            read -r -p "Enter your provider's base URL (e.g. http://localhost:11434/v1 for Ollama): " custom_url
-            export LLM_BASE_URL="$custom_url"
-            echo "LLM_BASE_URL=$custom_url" >> "$SCRIPT_DIR/.env" 2>/dev/null || true
-            read -r -p "Enter model name (e.g. llama3, mixtral-8x7b): " custom_model
-            DEFAULT_MODEL="$custom_model"
-            ;;
-        *)
-            echo -e "${RED}Invalid choice. Defaulting to Anthropic.${NC}"
-            LLM_PROVIDER="anthropic"
-            DEFAULT_MODEL="claude-sonnet-4-6"
-            ;;
-    esac
-
-    export LLM_PROVIDER="$LLM_PROVIDER"
-    echo "LLM_PROVIDER=$LLM_PROVIDER" > "$SCRIPT_DIR/.env"
-    echo ""
-
-    # --- API Key ---
-    if [ "$LLM_PROVIDER" = "anthropic" ]; then
-        key_var="ANTHROPIC_API_KEY"
-        key_url="https://console.anthropic.com/"
-    elif [ "$LLM_PROVIDER" = "deepseek" ]; then
-        key_var="DEEPSEEK_API_KEY"
-        key_url="https://platform.deepseek.com/"
-    elif [ "$LLM_PROVIDER" = "glm" ]; then
-        key_var="GLM_API_KEY"
-        key_url="https://open.bigmodel.cn/"
-    elif [ "$LLM_PROVIDER" = "openai" ]; then
-        key_var="OPENAI_API_KEY"
-        key_url="https://platform.openai.com/"
-    else
-        key_var="LLM_API_KEY"
-        key_url="your provider"
-    fi
-
-    if [ -z "${!key_var:-}" ] && [ -z "${LLM_API_KEY:-}" ]; then
-        echo -e "${YELLOW}API key not found.${NC}"
-        echo "Get your key at: $key_url"
-        echo ""
-        read -r -p "Enter your API key: " api_key
-        export LLM_API_KEY="$api_key"
-        echo "LLM_API_KEY=$api_key" >> "$SCRIPT_DIR/.env"
-        echo ""
-        echo -e "${GREEN}✓ API key set for this session${NC}"
-        echo "  To make it permanent, add this to your ~/.zshrc:"
-        echo "  export LLM_API_KEY='$api_key'"
-        echo ""
-    else
-        echo -e "${GREEN}✓ API key found${NC}"
-    fi
-
-    # --- Model ---
-    if [ -n "$DEFAULT_MODEL" ]; then
-        read -r -p "Model name [default: $DEFAULT_MODEL]: " model_name
-        model_name="${model_name:-$DEFAULT_MODEL}"
-        export LLM_MODEL="$model_name"
-        echo "LLM_MODEL=$model_name" >> "$SCRIPT_DIR/.env"
-        echo -e "${GREEN}✓ Using model: $model_name${NC}"
-        echo ""
-    fi
-
-    fi  # SKIP_LLM
 
     # Google Drive setup
     google_credentials_setup
@@ -619,8 +504,8 @@ first_time_setup() {
 
     echo ""
     echo -e "${GREEN}Setup complete!${NC}"
-    echo "  Provider: $LLM_PROVIDER"
-    echo "  Model: ${LLM_MODEL:-default}"
+    echo "  Next: open the SciKick side panel and click ⚙ Settings to enter"
+    echo "  your LLM provider and API key."
     echo ""
 }
 
@@ -754,11 +639,13 @@ start_server() {
         source "$SCRIPT_DIR/.env"
     fi
 
-    # Check for any LLM API key
-    if [ -z "${LLM_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${DEEPSEEK_API_KEY:-}" ] && [ -z "${GLM_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
-        echo -e "${RED}Error: No LLM API key found.${NC}"
-        echo "Run './start.sh --setup' first, or set LLM_API_KEY in your shell."
-        exit 1
+    # The server boots keyless — the LLM API key is configured in the
+    # extension's ⚙ Settings panel, not here. If no key is set yet, the side
+    # panel shows a nudge on first run; no need to block startup.
+    if [ -z "${LLM_API_KEY:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${DEEPSEEK_API_KEY:-}" ] && [ -z "${GLM_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -z "${GEMINI_API_KEY:-}" ] && [ -z "${MOONSHOT_API_KEY:-}" ]; then
+        echo -e "${YELLOW}No LLM API key found yet — that's fine.${NC}"
+        echo "  Open the SciKick side panel and click ⚙ Settings to enter your key."
+        echo ""
     fi
 
     echo ""
@@ -769,29 +656,11 @@ start_server() {
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
 
-    # ── First-run onboarding (skip if already set up) ──
-    TOKEN_FILE="$HOME/.scikick/google_token.json"
-    if [ ! -f "$TOKEN_FILE" ]; then
-        # Extension loading guide (first time only)
-        if [ -f "$SCRIPT_DIR/install-extension.sh" ]; then
-            bash "$SCRIPT_DIR/install-extension.sh"
-        else
-            echo -e "${YELLOW}Load the Chrome extension:${NC}"
-            echo "  → Go to chrome://extensions/"
-            echo "  → Enable 'Developer mode' (toggle in top right)"
-            echo "  → Click 'Load unpacked'"
-            echo "  → Select: $SCRIPT_DIR/extension"
-            echo ""
-        fi
-
-        # Wait for user to complete setup before starting server
-        echo ""
-        read -r -p "Once you've completed the steps above, type 'done' to start the server: " resp
-        while [ "$resp" != "done" ]; do
-            read -r -p "Type 'done' when ready: " resp
-        done
-        echo ""
-    fi
+    # No first-run gate here: the server boots keyless, and Google Drive
+    # access is added on demand via './start.sh --drive' (the side panel
+    # prompts for it when the user opens a Drive folder). Web Store users
+    # already have the extension, so the old "load unpacked / type done"
+    # onboarding is gone.
 
     echo -e "${YELLOW}Press Ctrl+C to stop the server${NC}"
     echo ""
@@ -993,6 +862,13 @@ case "${1:-}" in
         install_deps
         first_time_setup
         ;;
+    --drive)
+        # Add Google Drive access on demand — runnable while the server is up.
+        # Only places the OAuth client-secrets file (~/.scikick/google_credentials.json);
+        # the OAuth consent itself is triggered from the extension via /drive/auth/url.
+        google_credentials_setup && \
+          echo -e "${GREEN}Done. Return to the SciKick side panel and click 'Connect Google Drive'.${NC}"
+        ;;
     --install-service)
         install_service
         ;;
@@ -1016,7 +892,8 @@ case "${1:-}" in
         echo "Options:"
         echo "  (none)             Start the server"
         echo "  --install          Install dependencies, then start"
-        echo "  --setup            Setup wizard (LLM + Google Drive)"
+        echo "  --setup            Setup wizard (Google Drive + background service)"
+        echo "  --drive            Add Google Drive access (runnable while the server runs)"
         echo "  --install-service  Install as background service (auto-start on login)"
         echo "  --uninstall-service Remove background service"
         echo "  --help             Show this help"
