@@ -71,4 +71,4 @@ If this policy changes, the updated version will be posted in this repository wi
 
 ## Contact
 
-For privacy questions or requests, please open an issue at [github.com/JHCCoder/SciKick](https://github.com/JHCCoder/SciKick) or contact the repository owner.
+For privacy questions or requests, please open an issue at [github.com/JHCCoder/SciKick](https://github.com/JHCCoder/SciKick) or email [jhc103@ucsd.edu](mailto:jhc103@ucsd.edu).
