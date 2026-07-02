@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -148,7 +148,45 @@ async def auth_callback(state: str = Query(...), code: str = Query(...)):
     _drive_service = None
     _sheets_service = None
 
-    return {"status": "authenticated"}
+    return HTMLResponse(content=_AUTH_SUCCESS_HTML)
+
+
+# Friendly success page shown in the browser tab after the OAuth consent flow
+# completes. The side panel detects the new token on its next /drive/auth/status
+# poll (or when the user clicks "Check again").
+_AUTH_SUCCESS_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SciKick — Google Drive connected</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center;
+         justify-content: center; font-family: -apple-system, BlinkMacSystemFont,
+         "Segoe UI", Roboto, sans-serif; background: #f7f8fa; color: #1f2937; }
+  .card { background: #fff; border-radius: 14px; padding: 40px 36px; max-width: 420px;
+          text-align: center; box-shadow: 0 4px 24px rgba(0,0,0,0.08); }
+  .check { font-size: 52px; line-height: 1; margin-bottom: 12px; }
+  h1 { font-size: 20px; margin: 0 0 10px; }
+  p { font-size: 15px; line-height: 1.5; color: #4b5563; margin: 0 0 8px; }
+  .hint { font-size: 13px; color: #6b7280; margin-top: 16px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="check">✅</div>
+    <h1>Google Drive connected</h1>
+    <p>SciKick is now authenticated. You can close this tab and return to the
+       SciKick side panel to access Google Drive and work on your project.</p>
+    <p class="hint">In the side panel, click <strong>Check again</strong> if the
+       “Use this folder” button hasn’t appeared yet.</p>
+  </div>
+  <script>
+    // This tab was opened by the extension; try to close it automatically.
+    setTimeout(() => { try { window.close(); } catch (e) {} }, 1800);
+  </script>
+</body>
+</html>"""
 
 
 def _exchange_token_for_changed_scope(flow, code: str) -> None:

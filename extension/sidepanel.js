@@ -551,9 +551,6 @@ async function loadProject() {
     // Show context window usage
     updateContextUsage();
 
-    // Show onboarding focus options
-    if (!sessionFocus) showOnboardingOptions();
-
     // Refresh info panel if open
     if (!dom.infoPanel.classList.contains("hidden")) loadInfoPanel();
 
