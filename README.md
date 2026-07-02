@@ -90,10 +90,12 @@ Or copy the folder from a USB stick / shared drive — no git required.
 ```
 
 The wizard walks you through:
-- Choosing your LLM provider and entering your API key
 - Setting up Google Drive access (auto-opens each Google Cloud Console page for you, scans your Downloads for the credentials file, validates everything)
+- Optionally installing a background service so the server auto-starts on login
 
-**This takes ~5 minutes** — most of that is clicking buttons in Google Cloud Console tabs that the wizard opens for you.
+Your LLM provider and API key are configured separately — after the server boots, open the SciKick side panel and click ⚙ Settings.
+
+**This takes ~5–10 minutes** — most of that is clicking buttons in Google Cloud Console tabs that the wizard opens for you.
 
 ### 3. Start the server
 
@@ -163,7 +165,7 @@ Ask questions like:
 ./start.sh --setup
 ```
 
-If LLM is already configured, the wizard skips straight to Google Drive setup.
+The wizard sets up Google Drive access and offers to install the background service. (Your LLM provider/API key are configured in the extension's ⚙ Settings panel, not here.)
 
 ### What the wizard does
 
@@ -214,7 +216,7 @@ Each person needs their own setup — SciKick runs locally and uses personal API
 
 1. **Get the code**: `git clone https://github.com/JHCCoder/scikick.git` (or copy from a USB stick)
 2. **Get an LLM API key**: Sign up at [DeepSeek](https://platform.deepseek.com/) (or Anthropic, OpenAI, etc.)
-3. **Run the setup wizard**: `./start.sh --setup` — it guides you through Google Cloud setup and LLM config
+3. **Run the setup wizard**: `./start.sh --setup` — it guides you through Google Cloud setup (Drive access) and the background service
 4. **Start the server**: `./start.sh`
 5. **Load the extension**: Run `./install-extension.sh` or follow the manual steps
 6. **Authenticate**: Visit `http://localhost:8742/drive/auth/url`
@@ -273,7 +275,8 @@ Run `./start.sh --setup` again, or edit `.env` directly and restart the server.
 | Command | What it does |
 |---------|-------------|
 | `./start.sh` | Start the server |
-| `./start.sh --setup` | Setup wizard (LLM + Google Drive + background service) |
+| `./start.sh --setup` | Setup wizard (Google Drive + background service) |
+| `./start.sh --drive` | Add Google Drive access (runnable while the server runs) |
 | `./start.sh --install-service` | Install as background service (auto-start on login) |
 | `./start.sh --uninstall-service` | Remove background service |
 | `./start.sh --install` | Install dependencies then start |
