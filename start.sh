@@ -169,10 +169,101 @@ install_deps() {
     echo -e "${GREEN}✓ Dependencies installed${NC}"
 }
 
+# Auto-create the GCP project and enable Drive + Sheets APIs when the gcloud CLI
+# is available. Advances the global STEP to however far it got (3 = fully done,
+# 1 = project created but APIs not enabled, 0 = nothing) and sets GCLOUD_PROJECT_ID
+# so later Console URLs open with the project pre-selected.
+do_gcloud_fastpath() {
+    local acct pid errf resp
+    errf="$(mktemp 2>/dev/null || echo /tmp/scikick_gcloud_err)"
+
+    acct=$(gcloud config get-value account 2>/dev/null | tr -d '[:space:]' || true)
+    if [ -z "$acct" ]; then
+        echo "  Sign in to Google first — a browser window will open."
+        gcloud auth login >/dev/null 2>&1
+        acct=$(gcloud config get-value account 2>/dev/null | tr -d '[:space:]' || true)
+    fi
+    if [ -z "$acct" ]; then
+        echo -e "${YELLOW}  Sign-in didn't complete. Falling back to manual steps.${NC}"
+        rm -f "$errf" 2>/dev/null || true
+        return 1
+    fi
+    echo -e "${GREEN}  Signed in as: ${acct}${NC}"
+
+    pid="scikick-${RANDOM}"
+    read -r -p "  Project ID (globally unique, lowercase letters/digits) [default: ${pid}]: " resp
+    pid="${resp:-$pid}"
+    pid=$(printf '%s' "$pid" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-')
+    [ -z "$pid" ] && pid="scikick-${RANDOM}"
+
+    echo "  Creating project '${pid}'…"
+    if ! gcloud projects create "$pid" --quiet >"$errf" 2>&1; then
+        # Name collisions are common — retry once with an extra suffix.
+        pid="${pid}-${RANDOM}"
+        if ! gcloud projects create "$pid" --quiet >"$errf" 2>&1; then
+            echo -e "${YELLOW}  Could not create the project:${NC}"
+            sed 's/^/    /' "$errf" 2>/dev/null | tail -5
+            echo -e "${YELLOW}  Falling back to manual steps.${NC}"
+            rm -f "$errf" 2>/dev/null || true
+            return 1
+        fi
+    fi
+    GCLOUD_PROJECT_ID="$pid"
+    STEP=1
+    gcloud config set project "$pid" --quiet >/dev/null 2>&1
+    echo "  Enabling Drive + Sheets APIs (can take ~30s)…"
+    if gcloud services enable drive.googleapis.com sheets.googleapis.com --quiet >"$errf" 2>&1; then
+        echo -e "${GREEN}  ✓ Project created and APIs enabled.${NC}"
+        echo ""
+        STEP=3
+    else
+        echo -e "${YELLOW}  APIs didn't enable automatically:${NC}"
+        sed 's/^/    /' "$errf" 2>/dev/null | tail -5
+        echo -e "${YELLOW}  Project '${pid}' exists — finish enabling the APIs manually below.${NC}"
+        echo ""
+    fi
+    rm -f "$errf" 2>/dev/null || true
+    return 0
+}
+
 google_credentials_setup() {
     CREDS_DIR="$HOME/.scikick"
     mkdir -p "$CREDS_DIR"
     CREDS_FILE="$CREDS_DIR/google_credentials.json"
+    STATE_FILE="$CREDS_DIR/drive_setup_state"
+    GCLOUD_PROJECT_ID=""
+
+    # ── Helpers ──
+    save_state()  { echo "$1" > "$STATE_FILE" 2>/dev/null || true; }
+    clear_state() { rm -f "$STATE_FILE" 2>/dev/null || true; }
+    load_state() {
+        local v=0
+        if [ -f "$STATE_FILE" ]; then
+            v=$(tr -dc '0-9' < "$STATE_FILE" 2>/dev/null || true)
+            v="${v:-0}"
+        fi
+        echo "${v:-0}"
+    }
+    # Console URL with the gcloud-created project pre-selected when known.
+    console_url() {
+        if [ -n "$GCLOUD_PROJECT_ID" ]; then
+            echo "$1?project=${GCLOUD_PROJECT_ID}"
+        else
+            echo "$1"
+        fi
+    }
+    # Copy text to the system clipboard (macOS/Linux). Returns 1 if unavailable.
+    copy_to_clipboard() {
+        local text="$1"
+        if command -v pbcopy &>/dev/null; then
+            printf '%s' "$text" | pbcopy && return 0
+        elif command -v xclip &>/dev/null; then
+            printf '%s' "$text" | xclip -selection clipboard && return 0
+        elif command -v xsel &>/dev/null; then
+            printf '%s' "$text" | xsel --clipboard --input && return 0
+        fi
+        return 1
+    }
 
     if [ -f "$CREDS_FILE" ]; then
         # Validate existing credentials
@@ -195,6 +286,7 @@ except:
             echo -e "${GREEN}✓ Google credentials configured (Client ID: ${EXISTING_ID}…)${NC}"
             echo "  To redo setup, delete $CREDS_FILE and re-run this wizard."
             echo ""
+            clear_state
             return 0
         else
             echo -e "${YELLOW}Existing credentials appear invalid. Let's redo the setup.${NC}"
@@ -202,135 +294,195 @@ except:
         fi
     fi
 
-    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${BLUE}  Google Drive Setup${NC}"
-    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo ""
-    echo "scikick needs access to your Google Drive to load your papers."
-    echo "I'll walk you through this in ~5–10 minutes."
-    echo "You'll need a Google account (any Gmail works)."
-    echo ""
-    echo -e "${YELLOW}Why this is needed:${NC}"
-    echo "  SciKick reads your Google Drive through your own Google Cloud"
-    echo "  project — it doesn't use a shared SciKick Google account. You'll"
-    echo "  create a personal OAuth credential (free, one-time) that lets the"
-    echo "  local server read your Drive. This is how the app gets Drive"
-    echo "  access; it's separate from the Chrome Web Store listing."
-    echo ""
+    # ── Resume from a previous attempt? ──
+    local completed resp
+    completed=$(load_state)   # 0..6: how many steps were completed last time
+    if [ "$completed" -ge 1 ] && [ "$completed" -lt 6 ]; then
+        echo -e "${YELLOW}Found an incomplete setup (reached step ${completed}/6).${NC}"
+        read -r -p "Resume from step $((completed+1))? [Y/n]: " resp
+        if [ "$resp" != "n" ] && [ "$resp" != "N" ]; then
+            echo "Resuming at step $((completed+1))."
+            echo ""
+        else
+            clear_state
+            completed=0
+        fi
+    fi
+    STEP="$completed"   # steps completed so far; a step N runs whenever STEP < N
+
+    # ── Intro + optional gcloud fast-path (fresh starts only) ──
+    if [ "$STEP" -eq 0 ]; then
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${BLUE}  Google Drive Setup${NC}"
+        echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+        echo "scikick needs access to your Google Drive to load your papers."
+        echo "I'll walk you through this in ~3–10 minutes."
+        echo "You'll need a Google account (any Gmail works)."
+        echo ""
+        echo -e "${YELLOW}Why this is needed:${NC}"
+        echo "  SciKick reads your Google Drive through your own Google Cloud"
+        echo "  project — it doesn't use a shared SciKick Google account. You'll"
+        echo "  create a personal OAuth credential (free, one-time) that lets the"
+        echo "  local server read your Drive. This is how the app gets Drive"
+        echo "  access; it's separate from the Chrome Web Store listing."
+        echo ""
+
+        if command -v gcloud &>/dev/null; then
+            echo -e "${GREEN}gcloud CLI detected.${NC}"
+            echo "  It can auto-create your project and enable the Drive + Sheets"
+            echo "  APIs (steps 1–3), so you skip straight to the consent screen."
+            read -r -p "  Use gcloud to do steps 1–3 automatically? [Y/n]: " resp
+            if [ "$resp" != "n" ] && [ "$resp" != "N" ]; then
+                do_gcloud_fastpath || true
+            fi
+        fi
+    fi
 
     # ── Step 1: Create project ──
-    echo -e "${YELLOW}Step 1/6: Create a Google Cloud project${NC}"
-    echo "A 'project' is just a container for your app settings."
-    echo "Name it whatever you like — we recommend 'SciKick'."
-    echo ""
-    if command -v open &>/dev/null; then
-        read -r -p "Open the project creation page in your browser? [Y/n]: " resp
-        if [ "$resp" != "n" ] && [ "$resp" != "N" ]; then
-            open "https://console.cloud.google.com/projectcreate" 2>/dev/null || true
+    if [ "$STEP" -lt 1 ]; then
+        echo -e "${YELLOW}Step 1/6: Create a Google Cloud project${NC}"
+        echo "A 'project' is just a container for your app settings."
+        echo "Name it whatever you like — we recommend 'SciKick'."
+        echo ""
+        if command -v open &>/dev/null; then
+            read -r -p "Open the project creation page in your browser? [Y/n]: " resp
+            if [ "$resp" != "n" ] && [ "$resp" != "N" ]; then
+                open "https://console.cloud.google.com/projectcreate" 2>/dev/null || true
+            fi
+        else
+            echo "Go to: https://console.cloud.google.com/projectcreate"
         fi
-    else
-        echo "Go to: https://console.cloud.google.com/projectcreate"
+        echo ""
+        echo "  → Click the blue 'CREATE' button"
+        echo "  → Wait for the notification bell to show 'Project created'"
+        read -r -p "Press Enter when your project is ready…"
+        save_state 1
     fi
-    echo ""
-    echo "  → Click the blue 'CREATE' button"
-    echo "  → Wait for the notification bell to show 'Project created'"
-    read -r -p "Press Enter when your project is ready…"
 
     # ── Step 2: Enable Drive API ──
-    echo ""
-    echo -e "${YELLOW}Step 2/6: Enable the Google Drive API${NC}"
-    if command -v open &>/dev/null; then
-        read -r -p "Open the Drive API page? [Y/n]: " resp
-        if [ "$resp" != "n" ] && [ "$resp" != "N" ]; then
-            open "https://console.cloud.google.com/apis/library/drive.googleapis.com" 2>/dev/null || true
+    if [ "$STEP" -lt 2 ]; then
+        echo ""
+        echo -e "${YELLOW}Step 2/6: Enable the Google Drive API${NC}"
+        local drive_url
+        drive_url=$(console_url "https://console.cloud.google.com/apis/library/drive.googleapis.com")
+        if command -v open &>/dev/null; then
+            read -r -p "Open the Drive API page? [Y/n]: " resp
+            if [ "$resp" != "n" ] && [ "$resp" != "N" ]; then
+                open "$drive_url" 2>/dev/null || true
+            fi
+        else
+            echo "Go to: $drive_url"
         fi
-    else
-        echo "Go to: https://console.cloud.google.com/apis/library/drive.googleapis.com"
+        echo "  → Make sure your project is selected (dropdown at the top)"
+        echo "  → Click the blue 'ENABLE' button"
+        read -r -p "Press Enter when done…"
+        save_state 2
     fi
-    echo "  → Make sure your project is selected (dropdown at the top)"
-    echo "  → Click the blue 'ENABLE' button"
-    read -r -p "Press Enter when done…"
 
     # ── Step 3: Enable Sheets API ──
-    echo ""
-    echo -e "${YELLOW}Step 3/6: Enable the Google Sheets API${NC}"
-    if command -v open &>/dev/null; then
-        read -r -p "Open the Sheets API page? [Y/n]: " resp
-        if [ "$resp" != "n" ] && [ "$resp" != "N" ]; then
-            open "https://console.cloud.google.com/apis/library/sheets.googleapis.com" 2>/dev/null || true
+    if [ "$STEP" -lt 3 ]; then
+        echo ""
+        echo -e "${YELLOW}Step 3/6: Enable the Google Sheets API${NC}"
+        local sheets_url
+        sheets_url=$(console_url "https://console.cloud.google.com/apis/library/sheets.googleapis.com")
+        if command -v open &>/dev/null; then
+            read -r -p "Open the Sheets API page? [Y/n]: " resp
+            if [ "$resp" != "n" ] && [ "$resp" != "N" ]; then
+                open "$sheets_url" 2>/dev/null || true
+            fi
+        else
+            echo "Go to: $sheets_url"
         fi
-    else
-        echo "Go to: https://console.cloud.google.com/apis/library/sheets.googleapis.com"
+        echo "  → Make sure your project is selected (dropdown at the top)"
+        echo "  → Click the blue 'ENABLE' button"
+        read -r -p "Press Enter when done…"
+        save_state 3
     fi
-    echo "  → Make sure your project is selected (dropdown at the top)"
-    echo "  → Click the blue 'ENABLE' button"
-    read -r -p "Press Enter when done…"
 
     # ── Step 4: OAuth consent screen ──
-    echo ""
-    echo -e "${YELLOW}Step 4/6: Configure the OAuth consent screen${NC}"
-    if command -v open &>/dev/null; then
-        read -r -p "Open APIs & Services dashboard? [Y/n]: " resp
-        if [ "$resp" != "n" ] && [ "$resp" != "N" ]; then
-            open "https://console.cloud.google.com/apis" 2>/dev/null || true
+    if [ "$STEP" -lt 4 ]; then
+        echo ""
+        echo -e "${YELLOW}Step 4/6: Configure the OAuth consent screen${NC}"
+        local consent_url
+        consent_url=$(console_url "https://console.cloud.google.com/apis")
+        if command -v open &>/dev/null; then
+            read -r -p "Open APIs & Services dashboard? [Y/n]: " resp
+            if [ "$resp" != "n" ] && [ "$resp" != "N" ]; then
+                open "$consent_url" 2>/dev/null || true
+            fi
+        else
+            echo "Go to: $consent_url"
         fi
-    else
-        echo "Go to: https://console.cloud.google.com/apis"
+        echo ""
+        echo "  → Make sure your project is selected (dropdown at the top)"
+        echo "  → In the left sidebar, click 'OAuth consent screen'."
+        echo "  → If this is a new project, you'll see an Overview page with a"
+        echo "    'GET STARTED' button (the OAuth platform isn't configured yet)."
+        echo "    Click 'GET STARTED'."
+        echo ""
+        echo "  In the Overview page that pops up:"
+        echo "  App information:"
+        echo "  → App name: whatever you like (we recommend 'SciKick')"
+        echo "  → User support email: your email address"
+        echo "  Audience:"
+        echo "  → Select 'External'"
+        echo "    (Internal requires a Google Workspace org —"
+        echo "     External lets your personal Gmail sign in)"
+        echo "  Contact information:"
+        echo "  → Email address: your email address"
+        echo "  Finish:"
+        echo "  → Check the agreement box → 'CONTINUE & CREATE'"
+        echo ""
+        echo "  Next, add the API scopes: 'Data access' → 'ADD OR REMOVE SCOPES'."
+        echo "  Use the 'Manually paste scopes' box — it takes all 3 at once:"
+        local s1="https://www.googleapis.com/auth/drive.readonly"
+        local s2="https://www.googleapis.com/auth/drive.file"
+        local s3="https://www.googleapis.com/auth/spreadsheets.readonly"
+        printf '    %s\n    %s\n    %s\n' "$s1" "$s2" "$s3"
+        if copy_to_clipboard "${s1}
+${s2}
+${s3}"; then
+            echo -e "  ${GREEN}✓ Copied all 3 scopes to your clipboard — paste into the box.${NC}"
+        else
+            echo "  (Couldn't reach the clipboard — copy the 3 lines above manually.)"
+        fi
+        echo "  → Click 'UPDATE' → 'SAVE'"
+        echo ""
+        echo "  Next to add Test user go to 'Audience' section:"
+        echo "  → Click 'ADD USERS' → enter your email → 'ADD'"
+        echo "  This lets you sign in before Google verifies the app —"
+        echo "     otherwise you'll get an 'unverified app' error."
+        read -r -p "Press Enter when done…"
+        save_state 4
     fi
-    echo ""
-    echo "  → Make sure your project is selected (dropdown at the top)"
-    echo "  → In the left sidebar, click 'OAuth consent screen'."
-    echo "  → If this is a new project, you'll see an Overview page with a"
-    echo "    'GET STARTED' button (the OAuth platform isn't configured yet)."
-    echo "    Click 'GET STARTED'."
-    echo ""
-    echo "  In the Overview page that pops up:"
-    echo "  App information:"
-    echo "  → App name: whatever you like (we recommend 'SciKick')"
-    echo "  → User support email: your email address"
-    echo "  Audience:"
-    echo "  → Select 'External'"
-    echo "    (Internal requires a Google Workspace org —"
-    echo "     External lets your personal Gmail sign in)"
-    echo "  Contact information:"
-    echo "  → Email address: your email address"
-    echo "  Finish:"
-    echo "  → Check the agreement box → 'CONTINUE & CREATE'"
-    echo ""
-    echo "  Next to change Scopes go to 'Data access' section:"
-    echo "  → Click 'ADD OR REMOVE SCOPES'"
-    echo "  → Add these scopes one at a time, or manually type them at the bottom:"
-    echo "      https://www.googleapis.com/auth/drive.readonly"
-    echo "      https://www.googleapis.com/auth/drive.file"
-    echo "      https://www.googleapis.com/auth/spreadsheets.readonly"
-    echo "  → Click 'UPDATE' → 'SAVE'"
-    echo ""
-    echo "  Next to add Test user go to 'Audience' section:"
-    echo "  → Click 'ADD USERS' → enter your email → 'ADD'"
-    echo "  This lets you sign in before Google verifies the app —"
-    echo "     otherwise you'll get an 'unverified app' error."
-    read -r -p "Press Enter when done…"
 
     # ── Step 5: Create OAuth client ID ──
-    echo ""
-    echo -e "${YELLOW}Step 5/6: Create the OAuth client ID${NC}"
-    if command -v open &>/dev/null; then
-        read -r -p "Open the Credentials page? [Y/n]: " resp
-        if [ "$resp" != "n" ] && [ "$resp" != "N" ]; then
-            open "https://console.cloud.google.com/apis/credentials" 2>/dev/null || true
+    if [ "$STEP" -lt 5 ]; then
+        echo ""
+        echo -e "${YELLOW}Step 5/6: Create the OAuth client ID${NC}"
+        local cred_url
+        cred_url=$(console_url "https://console.cloud.google.com/apis/credentials")
+        if command -v open &>/dev/null; then
+            read -r -p "Open the Credentials page? [Y/n]: " resp
+            if [ "$resp" != "n" ] && [ "$resp" != "N" ]; then
+                open "$cred_url" 2>/dev/null || true
+            fi
+        else
+            echo "Go to: $cred_url"
         fi
-    else
-        echo "Go to: https://console.cloud.google.com/apis/credentials"
+        echo ""
+        echo "  → Make sure your project is selected (dropdown at the top)"
+        echo "  → Click '+ CREATE CREDENTIALS' (top) → 'OAuth client ID'"
+        echo "  → Application type: 'Desktop application'"
+        echo "  → Name: 'scikick Desktop'"
+        echo "  → Click 'CREATE'"
+        echo "  → In the popup, click 'DOWNLOAD JSON'"
+        read -r -p "Press Enter after downloading the JSON file…"
+        save_state 5
     fi
-    echo ""
-    echo "  → Make sure your project is selected (dropdown at the top)"
-    echo "  → Click '+ CREATE CREDENTIALS' (top) → 'OAuth client ID'"
-    echo "  → Application type: 'Desktop application'"
-    echo "  → Name: 'scikick Desktop'"
-    echo "  → Click 'CREATE'"
-    echo "  → In the popup, click 'DOWNLOAD JSON'"
-    read -r -p "Press Enter after downloading the JSON file…"
 
+    if [ "$STEP" -lt 6 ]; then
     # ── Step 6: Find and install the credentials ──
     echo ""
     echo -e "${YELLOW}Step 6/6: Installing your credentials${NC}"
@@ -455,6 +607,7 @@ except Exception as e:
 
     echo -e "${GREEN}✓ Valid${NC}"
     echo ""
+    clear_state
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${GREEN}  Google Drive setup complete!${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -462,6 +615,7 @@ except Exception as e:
     echo "  When you run './start.sh' for the first time, you'll be prompted"
     echo "  to authenticate with Google."
     echo ""
+    fi
 }
 
 first_time_setup() {
