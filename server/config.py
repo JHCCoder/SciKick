@@ -43,18 +43,20 @@ GOOGLE_SCOPES = [
 # LLM Provider — unified multi-provider configuration
 # ---------------------------------------------------------------------------
 
-# Provider: "anthropic" | "deepseek" | "glm" | "openai" | "custom"
+# Provider: "anthropic" | "deepseek" | "glm" | "openai" | "gemini" | "kimi" | "custom"
 #   anthropic  → uses Anthropic SDK, model defaults to claude-sonnet-4-6
 #   deepseek   → uses OpenAI-compatible SDK, base_url = https://api.deepseek.com
 #   glm        → uses OpenAI-compatible SDK, base_url = https://open.bigmodel.cn/api/paas/v4
 #   openai     → uses OpenAI SDK, base_url = https://api.openai.com/v1
+#   gemini     → uses OpenAI-compatible SDK, base_url = https://generativelanguage.googleapis.com/v1beta/openai
+#   kimi       → uses OpenAI-compatible SDK, base_url = https://api.moonshot.cn/v1
 #   custom     → uses OpenAI-compatible SDK, base_url = LLM_BASE_URL (required)
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic").lower()
 
 # API key — use the unified key, or fall back to provider-specific ones
 LLM_API_KEY = os.getenv(
     "LLM_API_KEY",
-    os.getenv("ANTHROPIC_API_KEY", os.getenv("DEEPSEEK_API_KEY", os.getenv("GLM_API_KEY", os.getenv("OPENAI_API_KEY", "")))),
+    os.getenv("ANTHROPIC_API_KEY", os.getenv("DEEPSEEK_API_KEY", os.getenv("GLM_API_KEY", os.getenv("OPENAI_API_KEY", os.getenv("GEMINI_API_KEY", os.getenv("MOONSHOT_API_KEY", "")))))),
 )
 
 # Model name — if not set, auto-selected based on provider
@@ -80,6 +82,14 @@ PROVIDER_DEFAULTS = {
     "openai": {
         "model": "gpt-4o",
         "base_url": "https://api.openai.com/v1",
+    },
+    "gemini": {
+        "model": "gemini-2.0-flash",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+    },
+    "kimi": {
+        "model": "moonshot-v1-128k",
+        "base_url": "https://api.moonshot.cn/v1",
     },
     "custom": {
         "model": "gpt-4o",  # user should override via LLM_MODEL
@@ -158,8 +168,8 @@ def get_llm_config() -> dict:
     # Validate
     if not api_key:
         raise RuntimeError(
-            f"No API key found for provider '{provider}'. "
-            f"Set LLM_API_KEY (or the provider-specific env var) and restart."
+            f"No API key configured for provider '{provider}'. "
+            f"Open ⚙ Settings in the SciKick side panel to enter your API key."
         )
 
     if provider == "custom" and not base_url:

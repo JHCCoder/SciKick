@@ -8,12 +8,6 @@ chrome.sidePanel
   .setPanelBehavior({ openPanelOnActionClick: true })
   .catch(() => {});
 
-chrome.runtime.onInstalled.addListener((details) => {
-  if (details.reason === "install") {
-    chrome.runtime.openOptionsPage();
-  }
-});
-
 // ---------------------------------------------------------------------------
 // Active-tab relay — the side panel cannot read url/title from chrome.tabs.query
 // (Chrome strips those fields outside of the service worker), so all tab

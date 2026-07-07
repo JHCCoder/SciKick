@@ -2,7 +2,7 @@
 
 Supported providers:
   - anthropic (Anthropic SDK)
-  - deepseek, openai, custom (OpenAI-compatible SDK)
+  - deepseek, glm, openai, gemini, kimi, custom (OpenAI-compatible SDK)
 """
 
 from __future__ import annotations
@@ -515,6 +515,8 @@ _PROVIDER_MODELS: dict[str, str] = {
     "deepseek":   "deepseek-v4-pro, deepseek-v4-flash",
     "glm":        "glm-4-plus, glm-4-flash, glm-4-long, glm-4-air",
     "openai":     "gpt-4o, gpt-4-turbo, gpt-3.5-turbo",
+    "gemini":     "gemini-2.0-flash, gemini-2.5-flash, gemini-2.5-pro",
+    "kimi":       "moonshot-v1-128k, kimi-k2-0905-preview, moonshot-v1-32k",
 }
 
 
@@ -569,6 +571,8 @@ def _enrich_error(error_message: str, provider: str, model: str) -> str:
             "deepseek": "DEEPSEEK_API_KEY",
             "glm": "GLM_API_KEY",
             "openai": "OPENAI_API_KEY",
+            "gemini": "GEMINI_API_KEY",
+            "kimi": "MOONSHOT_API_KEY",
         }
         key_name = provider_key_names.get(provider, "LLM_API_KEY")
         parts.append(
@@ -873,7 +877,7 @@ async def send_message_sync(req: ChatRequest):
 
 
 class ConfigureRequest(BaseModel):
-    provider: str = ""      # "anthropic" | "deepseek" | "openai" | "custom"
+    provider: str = ""      # "anthropic" | "deepseek" | "glm" | "openai" | "gemini" | "kimi" | "custom"
     api_key: str = ""
     model: str = ""
     base_url: str = ""      # only for custom
@@ -948,14 +952,28 @@ async def list_providers():
             },
             {
                 "id": "openai",
-                "name": "OpenAI (GPT-4o, etc.)",
+                "name": "OpenAI (GPT)",
                 "sdk": "OpenAI SDK",
                 "models": "gpt-4o, gpt-4-turbo, gpt-3.5-turbo, etc.",
                 "env_vars": "LLM_API_KEY or OPENAI_API_KEY",
             },
             {
+                "id": "gemini",
+                "name": "Google (Gemini)",
+                "sdk": "OpenAI-compatible",
+                "models": "gemini-2.0-flash, gemini-2.5-flash, gemini-2.5-pro",
+                "env_vars": "LLM_API_KEY or GEMINI_API_KEY",
+            },
+            {
+                "id": "kimi",
+                "name": "Moonshot AI (Kimi)",
+                "sdk": "OpenAI-compatible",
+                "models": "moonshot-v1-128k, kimi-k2-0905-preview, moonshot-v1-32k",
+                "env_vars": "LLM_API_KEY or MOONSHOT_API_KEY",
+            },
+            {
                 "id": "custom",
-                "name": "Custom (OpenAI-compatible)",
+                "name": "Others (OpenAI-compatible)",
                 "sdk": "OpenAI-compatible SDK",
                 "models": "Any model your provider supports",
                 "env_vars": "LLM_API_KEY + LLM_BASE_URL (required)",
@@ -982,6 +1000,8 @@ MODEL_CONTEXT_WINDOWS = {
     "claude-fable-5": 200000,
     "gpt-4o": 128000,
     "gpt-4-turbo": 128000,
+    "gemini-2.0-flash": 1048576,
+    "moonshot-v1-128k": 131072,
 }
 
 

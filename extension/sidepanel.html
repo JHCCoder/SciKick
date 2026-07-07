@@ -30,8 +30,10 @@
         <option value="anthropic">Anthropic (Claude)</option>
         <option value="deepseek">DeepSeek</option>
         <option value="glm">Zhipu AI (GLM)</option>
-        <option value="openai">OpenAI (GPT-4o)</option>
-        <option value="custom">Custom (OpenAI-compatible)</option>
+        <option value="openai">OpenAI (GPT)</option>
+        <option value="gemini">Google (Gemini)</option>
+        <option value="kimi">Moonshot AI (Kimi)</option>
+        <option value="custom">Others (OpenAI-compatible)</option>
       </select>
 
       <label>API Key</label>
@@ -64,20 +66,41 @@
 
   <!-- Connection Banner (shown when not connected). Starts hidden so it
        doesn't flash before the first health check resolves; setServerStatus
-       reveals it on "disconnected" and hides it on "connected". -->
+       reveals it on "disconnected" and hides it on "connected". The first-run
+       variant (clone + ./start.sh) shows until the panel has ever connected;
+       thereafter the reconnect variant (service hint) shows. -->
   <div id="connect-banner" class="banner" style="display: none;">
-    <p><strong>⚠️ Backend server not running</strong></p>
-    <p>The assistant needs a local server to work.</p>
-    <p class="hint">If you've already set up the background service, the server should
-    start automatically when you log into your Mac. If it's still not working,
-    make sure your project folder isn't in ~/Desktop or ~/Documents — macOS
-    blocks background services from those locations.</p>
-    <p>Otherwise, open a terminal and run:</p>
-    <div id="startup-command">
-      <code id="cmd-text">cd SciKick && ./start.sh</code>
-      <button id="btn-copy-cmd" title="Copy command">📋</button>
+    <!-- First-run: server never reached yet (repo not cloned / not started). -->
+    <div id="firstrun-install">
+      <p><strong>👋 Welcome to SciKick</strong></p>
+      <p>The side panel needs a local helper server to run. Open a terminal and run:</p>
+      <p class="cmd-label">1. Clone the repo</p>
+      <div class="startup-command">
+        <code class="cmd-text">git clone https://github.com/JHCCoder/SciKick.git && cd SciKick</code>
+        <button class="btn-copy-cmd" title="Copy command">📋</button>
+      </div>
+      <p class="cmd-label">2. Start the server</p>
+      <div class="startup-command">
+        <code class="cmd-text">./start.sh</code>
+        <button class="btn-copy-cmd" title="Copy command">📋</button>
+      </div>
+      <p class="hint">Once it's running, click <strong>Retry</strong> below, then enter your API key in <strong>⚙ Settings</strong>. Google Drive is set up later — when you open a Drive folder, the panel will guide you.</p>
     </div>
-    <p class="hint">Then click <strong>Retry</strong> below or the ⟳ button.</p>
+    <!-- Reconnect: was connected before, server now down. -->
+    <div id="firstrun-reconnect" class="hidden">
+      <p><strong>⚠️ Backend server not running</strong></p>
+      <p>The assistant needs a local server to work.</p>
+      <p class="hint">If you've already set up the background service, the server should
+      start automatically when you log into your Mac. If it's still not working,
+      make sure your project folder isn't in ~/Desktop or ~/Documents — macOS
+      blocks background services from those locations.</p>
+      <p>Otherwise, open a terminal and run:</p>
+      <div class="startup-command">
+        <code class="cmd-text">cd SciKick && ./start.sh</code>
+        <button class="btn-copy-cmd" title="Copy command">📋</button>
+      </div>
+      <p class="hint">Then click <strong>Retry</strong> below or the ⟳ button.</p>
+    </div>
     <button id="btn-connect" class="btn-primary">⟳ Retry Connection</button>
   </div>
 
@@ -95,6 +118,32 @@
     <span id="current-tab-title" class="tab-title">Detecting current tab...</span>
     <span id="current-tab-domain" class="tab-domain"></span>
     <button id="btn-use-tab" class="hidden" title="Use this folder">Load this folder</button>
+  </div>
+
+  <!-- Drive Setup Banner: shown when the current tab is a Google Drive
+       folder but Drive isn't ready. Replaces the "Load this folder" button
+       until /drive/auth/status reports authenticated: true. -->
+  <div id="drive-setup-banner" class="banner" style="display: none;">
+    <!-- State A: credentials file missing → needs the terminal wizard. -->
+    <div class="ds-state" data-state="creds">
+      <p><strong>📁 Google Drive access needed</strong></p>
+      <p>To read this Drive folder, SciKick needs its own Google Drive credentials. In a terminal, run:</p>
+      <div class="startup-command">
+        <code class="cmd-text">./start.sh --drive</code>
+        <button class="btn-copy-cmd" title="Copy command">📋</button>
+      </div>
+      <p class="hint">That runs a one-time Google Cloud setup (it explains each step). Then come back here and click <strong>Check again</strong>.</p>
+    </div>
+    <!-- State B: credentials present, token missing → browser OAuth. -->
+    <div class="ds-state hidden" data-state="token">
+      <p><strong>🔗 Connect your Google account</strong></p>
+      <p>SciKick has its Drive credentials — sign in with Google so it can read your folder.</p>
+      <p class="hint">A Google sign-in page opens in a new tab. After you approve, come back and click <strong>Check again</strong>.</p>
+    </div>
+    <div class="ds-actions">
+      <button id="btn-drive-connect" class="btn-primary hidden">Connect Google Drive</button>
+      <button id="btn-drive-recheck" class="btn-primary">⟳ Check again</button>
+    </div>
   </div>
 
   <!-- Chat Area -->
