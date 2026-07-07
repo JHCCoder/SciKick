@@ -10,6 +10,7 @@ An AI research companion — Chrome extension + local server. Brainstorm ideas, 
 - **Google Drive integration** — Load papers, figures, and documents directly from Drive
 - **Cross-computer resume** — Session state saved to your Drive folder; pick up where you left off
 - **Runs locally** — No hosting costs, your data stays on your machine
+- **Cloud or local LLMs** — Use a hosted provider (Claude, GPT, Gemini, DeepSeek, GLM, Kimi) or run a model on your own machine via Ollama, LM Studio, or MLX — fully private, no API key needed for local
 - **Streaming responses** — Real-time AI chat with streaming
 
 ### 📹 Feature Demo Video
@@ -47,7 +48,7 @@ Chrome Extension (side panel) ↔ Local Server (localhost:8742) ↔ Google Drive
 - **Server**: Python/FastAPI
 - **Extension**: Chrome Manifest V3 side panel
 - **Memory**: `.scikick_memory.json` stored in your Google Drive project folder
-- **AI**: Multi-provider — Anthropic Claude, DeepSeek, OpenAI, or any OpenAI-compatible API
+- **AI**: Multi-provider — Anthropic Claude, DeepSeek, GLM, OpenAI, Gemini, Kimi, any OpenAI-compatible API, or local LLMs (Ollama / LM Studio / MLX)
 
 ---
 
@@ -57,22 +58,44 @@ Chrome Extension (side panel) ↔ Local Server (localhost:8742) ↔ Google Drive
 
 - **Python 3.10+**
 - **Chrome** (or Chromium-based browser: Edge, Brave, Arc)
-- **LLM API key** from one of the supported providers (see below)
+- **An LLM** — either an API key from a supported cloud provider, **or** a local model via Ollama/LM Studio/MLX (no key needed; see below)
 - **Google account** (any Gmail) — for Google Drive access
 
 ### Supported LLM Providers
 
-| Provider | Get API key at | Default model |
-|----------|---------------|---------------|
+| Provider | Get API key / install at | Default model |
+|----------|--------------------------|---------------|
 | **Anthropic (Claude)** | [console.anthropic.com](https://console.anthropic.com/) | `claude-sonnet-4-6` |
 | **DeepSeek** | [platform.deepseek.com](https://platform.deepseek.com/) | `deepseek-v4-pro` |
 | **Zhipu AI (GLM)** | [open.bigmodel.cn](https://open.bigmodel.cn/) | `glm-4-plus` |
 | **OpenAI (GPT-4o)** | [platform.openai.com](https://platform.openai.com/) | `gpt-4o` |
+| **Google (Gemini)** | [aistudio.google.com](https://aistudio.google.com/) (free tier available) | `gemini-2.0-flash` |
+| **Moonshot AI (Kimi)** | [platform.moonshot.cn](https://platform.moonshot.cn/) | `moonshot-v1-128k` |
+| **Local — Ollama** | [ollama.com](https://ollama.com/) (install) | `llama3.1` |
+| **Local — LM Studio** | [lmstudio.ai](https://lmstudio.ai/) (install) | (whatever model is loaded in the GUI) |
+| **Local — MLX Server** | [github.com/ml-explore/mlx-examples](https://github.com/ml-explore/mlx-examples) (install) | `mlx-community/Llama-3.1-8B-Instruct-4bit` |
 | **Custom** (Groq, Together, etc.) | Your provider | Any |
 
 > 💡 Want support for a specific AI provider? Open an issue or start a discussion on GitHub — we can usually add it quickly.
 >
-> 🏠 **Local LLMs (e.g. Ollama, LM Studio) are not officially supported yet** — SciKick currently talks to hosted LLM APIs. A dedicated local-LLLM mode is on the roadmap. In the meantime, the **Custom** provider can be pointed at any OpenAI-compatible endpoint, but this is untested and requires a dummy API key.
+> 🏠 **Local LLMs are fully supported** — Ollama, LM Studio, and MLX Server are first-class options in the ⚙ Settings dropdown. No API key required (SciKick fills a placeholder the runtime ignores). See [Local LLM setup](#-local-llm-setup) below.
+
+#### 🏠 Local LLM setup
+
+SciKick can chat with a model running entirely on your machine — fully private, no API key, no per-token cost. Great for drafting, summarizing, and offline work.
+
+1. **Install a runtime and pull a model** (Ollama is the easiest):
+   ```bash
+   brew install ollama
+   ollama serve            # starts the server on :11434
+   ollama pull gemma3:27b  # or qwen2.5:14b, llama3.1, phi4, etc.
+   ```
+   LM Studio and MLX Server work too — just start their built-in local server.
+2. **Open the SciKick side panel → ⚙ Settings.**
+3. **Pick your local runtime** (Ollama / LM Studio / MLX) from the Provider dropdown. The Base URL is prefilled (`http://localhost:11434/v1` for Ollama, `:1234/v1` for LM Studio, `:8080/v1` for MLX) — edit it if your runtime uses a different port.
+4. **Set the model name** (e.g. `gemma3:27b`) and click **Save & Apply.** The API key field is hidden — leave it blank.
+
+> ⚠️ **Quality note:** Even strong local models (e.g. Gemma 3 27B) generally don't match Claude Sonnet / GPT-4-class cloud models on nuanced scientific revision. Use local for drafting, summarizing, and privacy; switch back to a cloud provider for heavy restructuring. **RAM rule of thumb** (4-bit quantized): ~1 GB per 7B params — a 32 GB machine comfortably runs up to ~14B, and can squeeze a 27B.
 
 ### 1. Get the code
 
@@ -215,7 +238,7 @@ Each person needs their own setup — SciKick runs locally and uses personal API
 ### For a labmate setting up from scratch
 
 1. **Get the code**: `git clone https://github.com/JHCCoder/scikick.git` (or copy from a USB stick)
-2. **Get an LLM API key**: Sign up at [DeepSeek](https://platform.deepseek.com/) (or Anthropic, OpenAI, etc.)
+2. **Get an LLM**: Sign up at [DeepSeek](https://platform.deepseek.com/) (or Anthropic, OpenAI, etc.) for an API key — or run a local model via Ollama/LM Studio/MLX (no key needed; see [Local LLM setup](#-local-llm-setup))
 3. **Run the setup wizard**: `./start.sh --setup` — it guides you through Google Cloud setup (Drive access) and the background service
 4. **Start the server**: `./start.sh`
 5. **Load the extension**: Run `./install-extension.sh` or follow the manual steps
@@ -249,10 +272,10 @@ Same as above — clone the code, run `./start.sh --setup` on the new machine (y
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LLM_PROVIDER` | `anthropic` | Provider: `anthropic`, `deepseek`, `glm`, `openai`, or `custom` |
-| `LLM_API_KEY` | (required) | Your API key |
+| `LLM_PROVIDER` | `anthropic` | Provider: `anthropic`, `deepseek`, `glm`, `openai`, `gemini`, `kimi`, `local-ollama`, `local-lmstudio`, `local-mlx`, or `custom` |
+| `LLM_API_KEY` | (required for cloud) | Your API key — not needed for local providers |
 | `LLM_MODEL` | (provider default) | Model name override |
-| `LLM_BASE_URL` | (provider default) | Base URL for custom providers |
+| `LLM_BASE_URL` | (provider default) | Base URL — preset for local runtimes, required for `custom` |
 
 These are saved to `.env` by the setup wizard.
 
@@ -332,6 +355,9 @@ Make sure you created an OAuth client ID of type "Desktop application" (not "Web
 
 **"This app isn't verified" warning during Google sign-in**
 This is normal for a local app. Click "Advanced" → "Go to SciKick (unsafe)" to continue. You added yourself as a test user during setup, so this works.
+
+**Local LLM not responding / "connection refused"**
+Make sure your runtime is running (`ollama serve` for Ollama) and the Base URL in ⚙ Settings matches the port — `11434` for Ollama, `1234` for LM Studio, `8080` for MLX. Also confirm you've pulled/loaded a model and that the model name in Settings matches exactly (e.g. `gemma3:27b`, including the tag).
 
 ---
 
