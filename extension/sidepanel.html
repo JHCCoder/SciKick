@@ -27,16 +27,20 @@
     <div class="settings-body">
       <label>Provider</label>
       <select id="cfg-provider">
-        <option value="anthropic">Anthropic (Claude)</option>
-        <option value="deepseek">DeepSeek</option>
-        <option value="glm">Zhipu AI (GLM)</option>
-        <option value="openai">OpenAI (GPT)</option>
-        <option value="gemini">Google (Gemini)</option>
-        <option value="kimi">Moonshot AI (Kimi)</option>
-        <option value="local-ollama">Local LLM — Ollama</option>
-        <option value="local-lmstudio">Local LLM — LM Studio</option>
-        <option value="local-mlx">Local LLM — MLX Server</option>
-        <option value="custom">Others (OpenAI-compatible)</option>
+        <optgroup label="Cloud APIs">
+          <option value="anthropic">Anthropic (Claude)</option>
+          <option value="deepseek">DeepSeek</option>
+          <option value="glm">Zhipu AI (GLM)</option>
+          <option value="openai">OpenAI (GPT)</option>
+          <option value="gemini">Google (Gemini)</option>
+          <option value="kimi">Moonshot AI (Kimi)</option>
+          <option value="custom">Others (OpenAI-compatible)</option>
+        </optgroup>
+        <optgroup label="Local">
+          <option value="local-ollama">Ollama</option>
+          <option value="local-lmstudio">LM Studio</option>
+          <option value="local-mlx">MLX Server</option>
+        </optgroup>
       </select>
 
       <label id="cfg-api-key-label">API Key</label>

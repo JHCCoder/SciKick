@@ -281,6 +281,12 @@ body {
   border-color: var(--warning);
   outline: none;
 }
+/* Optgroup headers ("Cloud APIs" / "Local") — ensure contrast on dark theme */
+.settings-body select optgroup {
+  color: var(--text-secondary);
+  font-style: normal;
+  font-weight: 600;
+}
 .settings-actions {
   display: flex;
   align-items: center;
