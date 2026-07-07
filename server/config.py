@@ -95,7 +95,31 @@ PROVIDER_DEFAULTS = {
         "model": "gpt-4o",  # user should override via LLM_MODEL
         "base_url": LLM_BASE_URL,  # required
     },
+    # Local LLM runtimes — OpenAI-compatible, no API key required.
+    # The placeholder key "local" is filled in by get_llm_config() because
+    # the OpenAI SDK rejects an empty string; local runtimes ignore it.
+    "local-ollama": {
+        "model": "llama3.1",
+        "base_url": "http://localhost:11434/v1",
+    },
+    "local-lmstudio": {
+        "model": "",  # LM Studio serves whatever model is loaded in its GUI
+        "base_url": "http://localhost:1234/v1",
+    },
+    "local-mlx": {
+        "model": "mlx-community/Llama-3.1-8B-Instruct-4bit",
+        "base_url": "http://localhost:8080/v1",
+    },
 }
+
+# Local LLM runtimes — exempt from the API-key requirement and persist
+# their base_url so edited ports survive restart.
+_LOCAL_PROVIDERS = {"local-ollama", "local-lmstudio", "local-mlx"}
+
+
+def _is_local_provider(provider: str) -> bool:
+    """True for local LLM runtimes (Ollama / LM Studio / MLX)."""
+    return provider in _LOCAL_PROVIDERS
 
 
 # Runtime overrides — allow changing LLM config without restarting the server
@@ -134,12 +158,19 @@ def _save_runtime_config_to_env() -> None:
         lines.append(f"{key}={value}")
 
     _set_or_append("LLM_PROVIDER", config["provider"])
-    _set_or_append("LLM_API_KEY", config["api_key"])
+    # Don't persist the placeholder API key for local providers — they don't
+    # use one, and writing "local" here would leak a stale key if the user
+    # later switches back to a cloud provider without re-entering a real key.
+    if not _is_local_provider(config["provider"]):
+        _set_or_append("LLM_API_KEY", config["api_key"])
     _set_or_append("LLM_MODEL", config["model"])
-    # Only persist base_url for "custom" provider — known providers
-    # (anthropic, deepseek, glm, openai) have correct defaults in PROVIDER_DEFAULTS.
-    # Persisting them would leak a stale URL when switching providers later.
-    if config.get("base_url") and config["provider"] == "custom":
+    # Only persist base_url for "custom" and local providers — known cloud
+    # providers (anthropic, deepseek, glm, openai) have correct defaults in
+    # PROVIDER_DEFAULTS, and persisting them would leak a stale URL when
+    # switching providers later.
+    if config.get("base_url") and (
+        config["provider"] == "custom" or _is_local_provider(config["provider"])
+    ):
         _set_or_append("LLM_BASE_URL", config["base_url"])
 
     env_path.write_text("\n".join(lines) + "\n")
@@ -164,6 +195,11 @@ def get_llm_config() -> dict:
         base_url = LLM_BASE_URL  # only for "custom" or unlisted providers
 
     api_key = _runtime_overrides.get("api_key") or LLM_API_KEY
+
+    # Local LLM runtimes don't use an API key, but the OpenAI SDK rejects an
+    # empty string — fill in a placeholder it will ignore.
+    if not api_key and _is_local_provider(provider):
+        api_key = "local"
 
     # Validate
     if not api_key:

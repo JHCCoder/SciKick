@@ -33,10 +33,13 @@
         <option value="openai">OpenAI (GPT)</option>
         <option value="gemini">Google (Gemini)</option>
         <option value="kimi">Moonshot AI (Kimi)</option>
+        <option value="local-ollama">Local LLM — Ollama</option>
+        <option value="local-lmstudio">Local LLM — LM Studio</option>
+        <option value="local-mlx">Local LLM — MLX Server</option>
         <option value="custom">Others (OpenAI-compatible)</option>
       </select>
 
-      <label>API Key</label>
+      <label id="cfg-api-key-label">API Key</label>
       <input type="password" id="cfg-api-key" placeholder="sk-...">
 
       <label>Model</label>

@@ -11,6 +11,14 @@ const SERVER_URL = "http://localhost:8742";
 const POLL_INTERVAL_MS = 5000; // Health check polling
 const HEALTH_FAIL_THRESHOLD = 2; // Consecutive failures before showing disconnected
 
+// Default Base URLs for local LLM runtimes — prefilled when the user picks
+// one in the dropdown. Mirrors PROVIDER_DEFAULTS in server/config.py.
+const LOCAL_DEFAULTS = {
+  "local-ollama": "http://localhost:11434/v1",
+  "local-lmstudio": "http://localhost:1234/v1",
+  "local-mlx": "http://localhost:8080/v1",
+};
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -65,6 +73,7 @@ const dom = {
   btnSettingsSave: $("#btn-settings-save"),
   cfgProvider: $("#cfg-provider"),
   cfgApiKey: $("#cfg-api-key"),
+  cfgApiKeyLabel: $("#cfg-api-key-label"),
   cfgModel: $("#cfg-model"),
   cfgBaseUrl: $("#cfg-base-url"),
   cfgBaseUrlLabel: $("#cfg-base-url-label"),
@@ -302,7 +311,7 @@ async function openSettings() {
   }
   dom.cfgApiKey.value = ""; // never pre-fill the key
   dom.settingsPanel.classList.remove("hidden");
-  handleProviderChange();
+  handleProviderChange(false);
 }
 
 function closeSettings() {
@@ -311,15 +320,27 @@ function closeSettings() {
   dom.cfgStatus.className = "";
 }
 
-function handleProviderChange() {
+function handleProviderChange(prefill = true) {
   const provider = dom.cfgProvider.value;
-  if (provider === "custom") {
-    dom.cfgBaseUrl.classList.remove("hidden");
-    dom.cfgBaseUrlLabel.classList.remove("hidden");
-  } else {
-    dom.cfgBaseUrl.classList.add("hidden");
-    dom.cfgBaseUrlLabel.classList.add("hidden");
+  const isLocal = Object.prototype.hasOwnProperty.call(LOCAL_DEFAULTS, provider);
+  const showsBaseUrl = provider === "custom" || isLocal;
+
+  // Base URL field — shown for custom + local runtimes.
+  dom.cfgBaseUrl.classList.toggle("hidden", !showsBaseUrl);
+  dom.cfgBaseUrlLabel.classList.toggle("hidden", !showsBaseUrl);
+
+  // Prefill the local runtime's default port when the field is empty so the
+  // user sees what endpoint will be used (still editable). Only on
+  // user-initiated changes — on settings-open we leave the field empty so a
+  // previously saved custom port isn't clobbered (an empty field sends no
+  // base_url, so the server keeps its existing value).
+  if (prefill && isLocal && !dom.cfgBaseUrl.value.trim()) {
+    dom.cfgBaseUrl.value = LOCAL_DEFAULTS[provider];
   }
+
+  // API Key — local runtimes don't use one; hide the field + label.
+  dom.cfgApiKey.classList.toggle("hidden", isLocal);
+  dom.cfgApiKeyLabel.classList.toggle("hidden", isLocal);
 }
 
 async function saveSettings() {

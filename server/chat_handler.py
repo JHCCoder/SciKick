@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from config import get_llm_config
+from config import get_llm_config, _is_local_provider
 from context_engine import (
     PaperDocument,
     ReviewerComment,
@@ -517,6 +517,10 @@ _PROVIDER_MODELS: dict[str, str] = {
     "openai":     "gpt-4o, gpt-4-turbo, gpt-3.5-turbo",
     "gemini":     "gemini-2.0-flash, gemini-2.5-flash, gemini-2.5-pro",
     "kimi":       "moonshot-v1-128k, kimi-k2-0905-preview, moonshot-v1-32k",
+    # Local runtimes — model names depend on what the user has loaded.
+    "local-ollama":   "llama3.1, qwen2.5, deepseek-r1 (whatever you `ollama pull`ed)",
+    "local-lmstudio": "whatever model is loaded in the LM Studio GUI",
+    "local-mlx":      "mlx-community/* model IDs (e.g. Llama-3.1-8B-Instruct-4bit)",
 }
 
 
@@ -581,6 +585,20 @@ def _enrich_error(error_message: str, provider: str, model: str) -> str:
             f"({key_name}) — not a key from another provider. "
             f"Check the ⚙ Settings panel and re-enter the correct key."
         )
+
+    # Local runtimes — the most common failure is the server not running /
+    # wrong port, not an auth or model-name issue.
+    if _is_local_provider(provider):
+        is_conn = any(kw in msg_lower for kw in (
+            "connection", "refused", "timeout", "timed out",
+            "unreachable", "winerror 10061", "errno 111", "errno 61",
+        ))
+        if is_conn:
+            parts.append(
+                f"\n\n💡 Couldn't reach your local LLM runtime at the configured "
+                f"Base URL. Is **{provider}** running? Start it (e.g. `ollama serve`), "
+                f"check the port in the ⚙ Settings panel, and confirm a model is loaded."
+            )
 
     return "".join(parts)
 
@@ -970,6 +988,27 @@ async def list_providers():
                 "sdk": "OpenAI-compatible",
                 "models": "moonshot-v1-128k, kimi-k2-0905-preview, moonshot-v1-32k",
                 "env_vars": "LLM_API_KEY or MOONSHOT_API_KEY",
+            },
+            {
+                "id": "local-ollama",
+                "name": "Local LLM — Ollama",
+                "sdk": "OpenAI-compatible",
+                "models": "llama3.1, qwen2.5, deepseek-r1, etc. (whatever you `ollama pull`ed)",
+                "env_vars": "(none — local runtime, no key needed)",
+            },
+            {
+                "id": "local-lmstudio",
+                "name": "Local LLM — LM Studio",
+                "sdk": "OpenAI-compatible",
+                "models": "whatever model is loaded in the LM Studio GUI",
+                "env_vars": "(none — local runtime, no key needed)",
+            },
+            {
+                "id": "local-mlx",
+                "name": "Local LLM — MLX Server",
+                "sdk": "OpenAI-compatible",
+                "models": "mlx-community/* model IDs (e.g. Llama-3.1-8B-Instruct-4bit)",
+                "env_vars": "(none — local runtime, no key needed)",
             },
             {
                 "id": "custom",
