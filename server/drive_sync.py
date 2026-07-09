@@ -790,7 +790,7 @@ async def load_context(folder_id: str, force: bool = False):
     # Pass the manuscript's Drive file id so a later scan/focus request for
     # that same file can reuse the in-memory parse instead of re-downloading.
     set_project_context(doc, comments, images, source=f"drive:{folder_id}", doc_file_id=ms_id, doc_file_name=name)
-    set_project_file_index(all_files)  # Build file name→id index for file-focus feature
+    set_project_file_index(all_files, manuscript_file_id=ms_id)  # file name→id index + classified structure summary
 
     # 8. Update memory with paper sections, comment states, and file snapshots
     update_paper_sections([
@@ -852,6 +852,50 @@ async def load_context(folder_id: str, force: bool = False):
 # ---------------------------------------------------------------------------
 
 
+# --- File-type classification keywords (shared by _find_manuscript,
+# _find_comment_files, and classify_project_file) -------------------------
+MANUSCRIPT_KEYWORDS = ["manuscript", "paper", "draft", "article", "submission"]
+# Substrings that mark a file as supporting material, not the main text.
+# Kept conservative to avoid false positives on legitimate filenames.
+SUPPLEMENTAL_MARKERS = (
+    "supplement", "supplementary", "supplemental",
+    "supporting information", "supporting-material",
+    "appendix", "response to reviewer", "cover letter",
+)
+# Substrings that mark a file as the main text.
+MAIN_MARKERS = ("main submission", "main text", "main manuscript",
+                "main_manuscript", "main_submission", "full text",
+                "main document")
+COMMENT_KEYWORDS = [
+    "reviewer", "review", "comment", "feedback",
+    "referee", "response", "decision",
+]
+
+
+def classify_project_file(
+    name: str, mime: str, manuscript_file_id: str, file_id: str
+) -> str:
+    """Classify a project file for the structure summary.
+
+    Returns one of 'manuscript', 'supplement', 'reviewer_comment', 'other'.
+    The manuscript is identified by Drive file id (the file _find_manuscript
+    picked); the rest by filename keywords. Used only for the lazy structure
+    overview shown to the model — does NOT parse or load the file.
+    """
+    if manuscript_file_id and file_id == manuscript_file_id:
+        return "manuscript"
+    n = name.lower()
+    if any(m in n for m in SUPPLEMENTAL_MARKERS):
+        return "supplement"
+    # Reviewer-comment files: match comment keywords but exclude files that
+    # look like the manuscript itself (mirrors _find_comment_files).
+    if any(kw in n for kw in COMMENT_KEYWORDS) and not any(
+        kw in n for kw in ("manuscript", "paper", "draft", "article")
+    ):
+        return "reviewer_comment"
+    return "other"
+
+
 def _find_manuscript(files: list[dict]) -> Optional[dict]:
     """Find the most likely manuscript file in a list of Drive files.
 
@@ -862,18 +906,6 @@ def _find_manuscript(files: list[dict]) -> Optional[dict]:
     main text. We instead (1) strongly prefer files whose name says "main",
     and (2) exclude anything that looks like supporting material.
     """
-    manuscript_keywords = ["manuscript", "paper", "draft", "article", "submission"]
-    # Substrings that mark a file as supporting material, not the main text.
-    # Kept conservative to avoid false positives on legitimate filenames.
-    supplemental_markers = (
-        "supplement", "supplementary", "supplemental",
-        "supporting information", "supporting-material",
-        "appendix", "response to reviewer", "cover letter",
-    )
-    # Substrings that mark a file as the main text.
-    main_markers = ("main submission", "main text", "main manuscript",
-                    "main_manuscript", "main_submission", "full text",
-                    "main document")
     preferred_types = [
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
         "application/pdf",
@@ -885,11 +917,11 @@ def _find_manuscript(files: list[dict]) -> Optional[dict]:
 
     def is_supplement(f: dict) -> bool:
         n = name(f)
-        return any(m in n for m in supplemental_markers)
+        return any(m in n for m in SUPPLEMENTAL_MARKERS)
 
     def is_main(f: dict) -> bool:
         n = name(f)
-        return any(m in n for m in main_markers)
+        return any(m in n for m in MAIN_MARKERS)
 
     def largest(seq: list[dict]) -> Optional[dict]:
         # Tie-break by size so a multi-file folder still picks deterministically.
@@ -908,7 +940,7 @@ def _find_manuscript(files: list[dict]) -> Optional[dict]:
     #    supplement because "manuscript" appears in its name too).
     keyword_candidates = [
         f for f in candidates
-        if not is_supplement(f) and any(kw in name(f) for kw in manuscript_keywords)
+        if not is_supplement(f) and any(kw in name(f) for kw in MANUSCRIPT_KEYWORDS)
     ]
     if keyword_candidates:
         return largest(keyword_candidates)
@@ -934,10 +966,6 @@ def _find_manuscript(files: list[dict]) -> Optional[dict]:
 
 def _find_comment_files(files: list[dict]) -> list[dict]:
     """Find files likely to contain reviewer comments."""
-    comment_keywords = [
-        "reviewer", "review", "comment", "feedback",
-        "referee", "response", "decision",
-    ]
     comment_types = [
         "text/plain",
         "text/markdown",
@@ -956,7 +984,7 @@ def _find_comment_files(files: list[dict]) -> list[dict]:
         # as comments. (An earlier second loop here appended keyword-named files
         # of ANY type — .zip, .png, .pdf — which then failed silently in
         # load_context's comment extractor.)
-        if any(kw in name_lower for kw in comment_keywords):
+        if any(kw in name_lower for kw in COMMENT_KEYWORDS):
             if f["mimeType"] in comment_types or name_lower.endswith((".txt", ".md")):
                 results.append(f)
 

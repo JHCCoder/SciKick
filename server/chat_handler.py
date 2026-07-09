@@ -74,6 +74,15 @@ _focused_file_cache: dict[str, str] = {}
 # overwrite each other; the consumer disambiguates.
 _project_file_index: dict[str, list[dict]] = {}
 
+# Classified project structure — a list of {file_id, name, type, size, mime}
+# for EVERY file in the loaded Drive folder, where type is one of
+# 'manuscript' | 'supplement' | 'reviewer_comment' | 'other'. Built from the
+# file listing (names + the detected manuscript id) WITHOUT parsing the files
+# — a lazy structural overview shown to the model so it knows what's in the
+# project. Nothing here is loaded into _loaded_docs or considered "scanned";
+# files are still parsed on demand only when the user scans/keeps them.
+_project_structure: list[dict] = []
+
 # Set True after the server injects a "which document do you want me to scan?"
 # clarification. The next user message is then treated as the document choice
 # (even without a scan trigger word) and resolved by _resolve_doc_choice.
@@ -98,12 +107,12 @@ _scan_preference: str = ""  # "" | "yes" | "no"
 # designated manuscript). Cleared on /reset and /unload-project.
 _loaded_docs: list[dict] = []
 
-# Per-request keep acknowledgment, set in _prepare_scan_context and
-# consumed+cleared in _build_user_message. Either a doc was just kept
-# ({"kind": "kept", "name": ...}) or the user asked to keep the already-loaded
-# manuscript ({"kind": "manuscript", "name": ...}) — both warrant an honest
-# confirmation listing every file in context, so the model neither confabulates
-# a success for the manuscript nor under-reports the kept set.
+# Per-request keep acknowledgment, set in _prepare_scan_context (via
+# _add_loaded_doc) and consumed+cleared in _build_user_message. Always
+# {"kind": "kept", "name": ...} — whether a non-manuscript file was just kept
+# OR the manuscript was promoted from chunked _current_doc to full-text kept.
+# Triggers a confirmation listing every file in context so the model neither
+# confabulates a success nor under-reports the kept set.
 _keep_ack: Optional[dict] = None
 
 # Per-turn scan injection (one-shot focused file + full-manuscript deep scan)
@@ -158,17 +167,26 @@ _REMOVE_ALL_MARKERS = (
 )
 
 
-def set_project_file_index(files: list[dict]) -> None:
-    """Populate the file name→id index from a Drive file listing.
+def set_project_file_index(files: list[dict], manuscript_file_id: str = "") -> None:
+    """Populate the file name→id index and the classified structure summary.
 
     Called by drive_sync after loading a project folder.
-    Each file dict should have 'id' and 'name' keys.
+    Each file dict should have 'id', 'name', 'mimeType', and 'size' keys.
+    ``manuscript_file_id`` is the Drive id of the file _find_manuscript picked,
+    so it can be labelled 'manuscript' in the structure summary.
     """
-    global _project_file_index
+    global _project_file_index, _project_structure
     _project_file_index.clear()
+    _project_structure.clear()
+    # Lazy import avoids a circular import (drive_sync imports this module).
+    from drive_sync import classify_project_file
+
+    type_counts: dict[str, int] = {}
     for f in files:
         fid = f.get("id")
         name = f.get("name", "")
+        mime = f.get("mimeType", "")
+        size = f.get("size", 0)
         if fid and name:
             entry = {"id": fid, "name": name}
             # Index both the full name and just the filename (strip path)
@@ -177,6 +195,20 @@ def set_project_file_index(files: list[dict]) -> None:
             _project_file_index.setdefault(full, []).append(entry)
             if basename != full:
                 _project_file_index.setdefault(basename, []).append(entry)
+        # Classified structure entry for every file (even non-parseable ones,
+        # so the model sees the full folder layout).
+        ftype = classify_project_file(name, mime, manuscript_file_id, fid or "")
+        type_counts[ftype] = type_counts.get(ftype, 0) + 1
+        _project_structure.append({
+            "file_id": fid or "",
+            "name": name,
+            "type": ftype,
+            "size": int(size) if size else 0,
+            "mime": mime,
+        })
+    if _project_structure:
+        breakdown = ", ".join(f"{c} {t}" for t, c in sorted(type_counts.items()))
+        logger.info("Project structure: %d files (%s)", len(_project_structure), breakdown)
 
 
 def set_project_context(
@@ -393,6 +425,44 @@ def _build_system_prompt() -> str:
         )
     except Exception:
         pass
+
+    # Classified project structure — a lazy metadata overview of every file in
+    # the loaded Drive folder (no file contents). Tells the model what's in the
+    # project so it can answer "what files are in this project?" and route
+    # scan/keep requests accurately. Nothing here is loaded into context.
+    if _project_structure:
+        def _human_size(n: int) -> str:
+            if not n:
+                return "?"
+            if n >= 1_000_000:
+                return f"{n / 1_000_000:.1f} MB"
+            if n >= 1_000:
+                return f"{n / 1_000:.0f} KB"
+            return f"{n} B"
+
+        lines = [
+            f"- {e['name']} — {e['type']} ({_human_size(e['size'])})"
+            for e in _project_structure
+        ]
+        structure_block = (
+            "\n\n## Project Structure\n"
+            "Files in this project (classified, NOT auto-loaded into context):\n"
+            + "\n".join(lines)
+            + "\n"
+        )
+        if _current_doc is not None and _current_doc.sections:
+            headings = ", ".join(s.heading for s in _current_doc.sections if s.heading)
+            if headings:
+                structure_block += (
+                    f"Manuscript section headings: {headings}\n"
+                )
+        structure_block += (
+            "The manuscript is auto-loaded and searched by keyword each turn "
+            "(top matching chunks). Other files are NOT in context until the "
+            "user scans/keeps them (e.g. \"scan and keep <file> in context\"). "
+            "If the user asks what's in the project, answer from this list.\n"
+        )
+        prompt += structure_block
 
     memory = get_current_memory()
     if memory and memory.chat_history:
@@ -819,6 +889,19 @@ def _manuscript_text_if_target(file_id: Optional[str]) -> Optional[str]:
     return None
 
 
+def _manuscript_is_kept() -> bool:
+    """True when the loaded manuscript has also been added to _loaded_docs.
+
+    In that case its full text is already injected every turn via the
+    ## Loaded Documents block, so the per-turn manuscript chunk retrieval
+    (and a one-shot deep-manuscript injection) would be redundant — callers
+    use this to skip them.
+    """
+    return bool(_current_doc_file_id) and any(
+        d["file_id"] == _current_doc_file_id for d in _loaded_docs
+    )
+
+
 def _add_loaded_doc(file_id: str, name: str, text: str) -> bool:
     """Add a file's text to the persistent loaded-documents set.
 
@@ -1017,8 +1100,14 @@ async def _prepare_scan_context(
         if named:
             fid, fname = named
             if _manuscript_text_if_target(fid) is not None:
-                logger.info("Loaded-docs: '%s' is the loaded manuscript; already in context", fname)
-                _keep_ack = {"kind": "manuscript", "name": fname}
+                # The named file IS the loaded manuscript — promote it from
+                # chunked _current_doc to full-text kept (every turn). Reuse the
+                # already-parsed text; no re-download. _add_loaded_doc dedupes by
+                # file_id, so re-pressing scan is idempotent, and sets the
+                # "kept" ack. Chunk retrieval is suppressed downstream when kept.
+                ms_text = _manuscript_text_if_target(fid)
+                _add_loaded_doc(_current_doc_file_id, _current_doc_file_name or fname, ms_text)
+                logger.info("Loaded-docs: '%s' is the manuscript; kept in full text", fname)
             else:
                 text = await _download_and_parse_file(fid, fname)
                 if text:
@@ -1036,8 +1125,9 @@ async def _prepare_scan_context(
             fid = current_file["id"]
             fname = current_file.get("name", "unknown")
             if _manuscript_text_if_target(fid) is not None:
-                logger.info("Loaded-docs: current tab '%s' is the loaded manuscript; already in context", fname)
-                _keep_ack = {"kind": "manuscript", "name": fname}
+                ms_text = _manuscript_text_if_target(fid)
+                _add_loaded_doc(_current_doc_file_id, _current_doc_file_name or fname, ms_text)
+                logger.info("Loaded-docs: current tab '%s' is the manuscript; kept in full text", fname)
             else:
                 text = await _download_and_parse_file(fid, fname)
                 if text:
@@ -1050,9 +1140,14 @@ async def _prepare_scan_context(
                         f"suggest they click **Load Project** again, then retry."
                     )
     elif intent == "keep_manuscript":
-        # The manuscript is already _current_doc (in context every turn).
-        logger.info("Loaded-docs: manuscript already in context as _current_doc")
-        _keep_ack = {"kind": "manuscript", "name": _current_doc_file_name or "the manuscript"}
+        # Promote the manuscript from chunked _current_doc to full-text kept.
+        if _current_doc is not None and _current_doc_file_id:
+            _add_loaded_doc(
+                _current_doc_file_id,
+                _current_doc_file_name or "the manuscript",
+                _current_doc.full_text,
+            )
+            logger.info("Loaded-docs: manuscript kept in full text")
     elif intent == "remove_named":
         named = _match_named_file(message)
         if named:
@@ -1072,7 +1167,12 @@ async def _prepare_scan_context(
             ms_text = _manuscript_text_if_target(fid)
             if ms_text is not None:
                 # Named file is the loaded manuscript — use in-memory parse.
-                full_manuscript_content = ms_text
+                if _manuscript_is_kept():
+                    # Already kept in full (## Loaded Documents every turn) —
+                    # a one-shot inject would duplicate it. Skip.
+                    logger.info("Focus file: '%s' is the manuscript and already kept; skipping one-shot inject", fname)
+                else:
+                    full_manuscript_content = ms_text
             elif _is_kept_doc(fid):
                 # Already kept — injected every turn via the Loaded Documents
                 # block. Don't re-inject as a one-shot focused file: it would
@@ -1107,7 +1207,11 @@ async def _prepare_scan_context(
             ms_text = _manuscript_text_if_target(fid)
             if ms_text is not None:
                 # The tab file is the loaded manuscript — use in-memory parse.
-                full_manuscript_content = ms_text
+                if _manuscript_is_kept():
+                    logger.info("Focus file: current tab '%s' is the manuscript and already kept; skipping one-shot inject",
+                                current_file.get("name", "unknown"))
+                else:
+                    full_manuscript_content = ms_text
             elif _is_kept_doc(fid):
                 # Already kept — injected every turn via the Loaded Documents
                 # block; skip the one-shot inject (dedup by document id).
@@ -1131,7 +1235,12 @@ async def _prepare_scan_context(
                     focus_id = None
                     focused_file_name = None
     elif intent == "deep_manuscript":
-        if _current_doc is not None:
+        if _manuscript_is_kept():
+            # Already kept in full (in ## Loaded Documents every turn) — a
+            # one-shot full-manuscript inject would duplicate it. Skip and let
+            # normal retrieval (comments + chat) run.
+            logger.info("Full-manuscript scan requested but manuscript already kept; skipping one-shot inject")
+        elif _current_doc is not None:
             full_manuscript_content = _current_doc.full_text
             logger.info(
                 "Full-manuscript scan requested (%d chars) — bypassing chunk retrieval",
@@ -1295,7 +1404,10 @@ def _build_user_message(
     # newly added figure legend near the end) is never seen by the model.
     # Cap the body so a very large manuscript can't blow the context budget;
     # the truncation note tells the model (and user) the tail was dropped.
-    if full_manuscript_content and _current_doc is not None:
+    # Skip entirely when the manuscript is already kept in full (## Loaded
+    # Documents injects it every turn) — a one-shot Full Manuscript block
+    # here would duplicate it.
+    if full_manuscript_content and _current_doc is not None and not _manuscript_is_kept():
         cap = _doc_char_budget(0.5)  # scales with the model's context window
         body = full_manuscript_content
         truncation_note = ""
@@ -1373,15 +1485,17 @@ def _build_user_message(
         memory = get_current_memory()
         chat_history = memory.chat_history if memory else []
 
-        # When the full manuscript is already injected above, skip the top-k
-        # paper-chunk retrieval (redundant) — still pull reviewer comments
-        # and recent chat history.
+        # When the full manuscript is already injected above (one-shot deep
+        # scan) OR the manuscript is kept in full (in ## Loaded Documents),
+        # skip the top-k paper-chunk retrieval (redundant) — still pull
+        # reviewer comments and recent chat history.
+        skip_paper_chunks = bool(full_manuscript_content) or _manuscript_is_kept()
         context = retrieve_context(
             query=message,
             doc=_current_doc,
             comments=_current_comments,
             chat_history=[t.model_dump() for t in chat_history],
-            include_paper_chunks=not bool(full_manuscript_content),
+            include_paper_chunks=not skip_paper_chunks,
         )
         if context:
             parts.append(context)
@@ -1428,48 +1542,33 @@ def _build_user_message(
             "keep a file, treat it as a fresh request.\n"
         )
 
-    # Scan-and-keep confirmation: when a keep happened (or the user asked to
-    # keep the already-loaded manuscript), acknowledge it honestly and list
-    # EVERY file currently in context — the auto-loaded manuscript plus all
-    # kept docs — so the user gets a complete "here's what's in context"
-    # signal and the model neither confabulates a success for the manuscript
-    # nor under-reports the kept set.
+    # Scan-and-keep confirmation: when a keep happened this turn, acknowledge
+    # it and list EVERY file currently in context — the manuscript (if not
+    # already kept) plus all kept docs — so the user gets a complete "here's
+    # what's in context" signal and the model doesn't under-report the set.
     if _keep_ack:
-        kind = _keep_ack["kind"]
         ack_name = _keep_ack["name"]
-        # Full in-context listing: the manuscript (auto-loaded, NOT in
-        # _loaded_docs) first, then every kept doc.
+        # Full in-context listing. The manuscript is auto-loaded as _current_doc
+        # (chunked) UNLESS it's been kept in full — in which case it already
+        # appears in the kept list below, so don't list it twice.
         in_context: list[str] = []
-        if _current_doc is not None:
+        if _current_doc is not None and not _manuscript_is_kept():
             ms_label = _current_doc_file_name or "the main manuscript"
-            in_context.append(f"{ms_label} (manuscript — auto-loaded)")
+            in_context.append(f"{ms_label} (manuscript — auto-loaded, chunked)")
         in_context.extend(d["name"] for d in _loaded_docs)
         n = len(in_context)
         listing = "\n".join(
             f"{i + 1}. {label}" for i, label in enumerate(in_context)
         ) if in_context else "(none)"
         parts.append("## Scan Confirmation\n")
-        if kind == "manuscript":
-            parts.append(
-                f"The user asked to keep **{ack_name}**, but that is the loaded "
-                f"manuscript — it is ALREADY in context (auto-loaded on Load Project "
-                f"and present every turn), so it does not need to be kept separately. "
-                f"Do NOT claim it was 'scanned and kept just now'; tell the user "
-                f"honestly that it was already loaded. Then list EVERY file currently "
-                f"in context — there are {n} total and you must name all {n}, omitting "
-                f"none:\n{listing}\n"
-                f"Be brief by NOT dumping file contents; the file LIST must be "
-                f"complete. Then wait for the user's next request.\n"
-            )
-        else:  # a doc was just kept
-            parts.append(
-                f"You just successfully scanned and kept **{ack_name}** in context. "
-                f"Reply with a one-line confirmation naming this file, then list "
-                f"EVERY file currently in context — there are {n} total and you must "
-                f"name all {n}, omitting none:\n{listing}\n"
-                f"Be brief by NOT dumping file contents; the file LIST must be "
-                f"complete. Then wait for the user's next request.\n"
-            )
+        parts.append(
+            f"You just successfully scanned and kept **{ack_name}** in context. "
+            f"Reply with a one-line confirmation naming this file, then list "
+            f"EVERY file currently in context — there are {n} total and you must "
+            f"name all {n}, omitting none:\n{listing}\n"
+            f"Be brief by NOT dumping file contents; the file LIST must be "
+            f"complete. Then wait for the user's next request.\n"
+        )
         _keep_ack = None  # one-shot — only confirm on the keep turn
 
     # Web-scraped papers (accumulate separately from Drive context)
@@ -2335,7 +2434,7 @@ async def reset_all_state():
     global _current_doc, _current_comments, _image_cache, _current_doc_source
     global _scraped_docs, _scraped_sources
     global _focused_file_cache
-    global _project_file_index
+    global _project_file_index, _project_structure
     global _awaiting_doc_choice
     global _awaiting_scan_confirmation, _scan_preference
     global _current_doc_file_id, _current_doc_file_name
@@ -2379,6 +2478,7 @@ async def reset_all_state():
         _scraped_sources = []
         _focused_file_cache = {}
         _project_file_index = {}
+        _project_structure = []
         _awaiting_doc_choice = False
         _awaiting_scan_confirmation = False
         _scan_preference = ""
@@ -2412,7 +2512,7 @@ async def unload_project():
     """
     global _current_doc, _current_comments, _image_cache, _current_doc_source
     global _focused_file_cache
-    global _project_file_index
+    global _project_file_index, _project_structure
     global _awaiting_doc_choice
     global _awaiting_scan_confirmation, _scan_preference
     global _current_doc_file_id, _current_doc_file_name
@@ -2451,6 +2551,7 @@ async def unload_project():
         _focused_file_cache = {}
         _current_doc_source = ""
         _project_file_index = {}
+        _project_structure = []
         _awaiting_doc_choice = False
         _awaiting_scan_confirmation = False
         _scan_preference = ""
