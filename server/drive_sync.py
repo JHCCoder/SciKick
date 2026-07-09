@@ -789,7 +789,7 @@ async def load_context(folder_id: str, force: bool = False):
     # 7. Load into chat handler
     # Pass the manuscript's Drive file id so a later scan/focus request for
     # that same file can reuse the in-memory parse instead of re-downloading.
-    set_project_context(doc, comments, images, source=f"drive:{folder_id}", doc_file_id=ms_id)
+    set_project_context(doc, comments, images, source=f"drive:{folder_id}", doc_file_id=ms_id, doc_file_name=name)
     set_project_file_index(all_files)  # Build file name→id index for file-focus feature
 
     # 8. Update memory with paper sections, comment states, and file snapshots

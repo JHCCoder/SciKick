@@ -55,6 +55,11 @@ _current_doc_source: str = ""  # "drive:<folder_id>"
 # same file can short-circuit to the already-parsed _current_doc instead of
 # re-downloading it from Drive (slow, and can time out on large files).
 _current_doc_file_id: str = ""
+# Drive file NAME of the loaded manuscript (e.g. "01_..._Main_Submission.docx"),
+# so confirmations can list it as an in-context file. The manuscript is NOT in
+# _loaded_docs (it's auto-loaded as _current_doc every turn), but the user
+# still expects to see it when they ask "what's in context".
+_current_doc_file_name: str = ""
 
 # Web-scraped papers — accumulate (multiple allowed), separate from Drive context
 _scraped_docs: list[PaperDocument] = []
@@ -93,11 +98,13 @@ _scan_preference: str = ""  # "" | "yes" | "no"
 # designated manuscript). Cleared on /reset and /unload-project.
 _loaded_docs: list[dict] = []
 
-# Name of the file most recently added to _loaded_docs THIS request (set in
-# _add_loaded_doc, consumed+cleared in _build_user_message). Used to emit a
-# "scan succeeded + here are all kept files" confirmation instruction so the
-# model acknowledges the keep instead of claiming the file was already loaded.
-_last_kept_doc_name: Optional[str] = None
+# Per-request keep acknowledgment, set in _prepare_scan_context and
+# consumed+cleared in _build_user_message. Either a doc was just kept
+# ({"kind": "kept", "name": ...}) or the user asked to keep the already-loaded
+# manuscript ({"kind": "manuscript", "name": ...}) — both warrant an honest
+# confirmation listing every file in context, so the model neither confabulates
+# a success for the manuscript nor under-reports the kept set.
+_keep_ack: Optional[dict] = None
 
 # Per-turn scan injection (one-shot focused file + full-manuscript deep scan)
 # from the most recent turn. One-shot scans aren't persistent state, so
@@ -178,14 +185,16 @@ def set_project_context(
     images: dict[str, bytes] = None,
     source: str = "",
     doc_file_id: str = "",
+    doc_file_name: str = "",
 ) -> None:
     """Set the current project context for chat sessions."""
     global _current_doc, _current_comments, _image_cache, _current_doc_source
-    global _current_doc_file_id
+    global _current_doc_file_id, _current_doc_file_name
     _current_doc = doc
     _current_comments = comments
     _current_doc_source = source
     _current_doc_file_id = doc_file_id
+    _current_doc_file_name = doc_file_name
     if images:
         _image_cache = images
     logger.info(
@@ -819,12 +828,12 @@ def _add_loaded_doc(file_id: str, name: str, text: str) -> bool:
     invalidate it — but also means the user should re-keep after editing a
     file if they want the fresh content.
     """
-    global _loaded_docs, _last_kept_doc_name
+    global _loaded_docs, _keep_ack
     for d in _loaded_docs:
         if d["file_id"] == file_id:
             return False  # already kept
     _loaded_docs.append({"file_id": file_id, "name": name, "text": text})
-    _last_kept_doc_name = name  # signal _build_user_message to confirm the keep
+    _keep_ack = {"kind": "kept", "name": name}  # confirm the keep in _build_user_message
     logger.info(
         "Loaded-docs: added '%s' (%d chars); %d document(s) now kept",
         name, len(text), len(_loaded_docs),
@@ -928,11 +937,12 @@ async def _prepare_scan_context(
       appropriate content is fetched (or a clarification is requested).
     """
     global _awaiting_doc_choice, _awaiting_scan_confirmation, _scan_preference
-    global _loaded_docs, _last_kept_doc_name
-    # Reset the per-request keep-confirmation flag: if a keep happens this turn
-    # _add_loaded_doc sets it, and _build_user_message consumes it. Clearing
-    # here prevents a stale flag from a prior failed request from leaking.
-    _last_kept_doc_name = None
+    global _loaded_docs, _keep_ack
+    # Reset the per-request keep-acknowledgment flag: if a keep happens this
+    # turn _add_loaded_doc (or a manuscript-target branch below) sets it, and
+    # _build_user_message consumes it. Clearing here prevents a stale flag from
+    # a prior failed request from leaking into a normal turn.
+    _keep_ack = None
 
     focused_file_content: Optional[str] = None
     focused_file_name: Optional[str] = None
@@ -1008,6 +1018,7 @@ async def _prepare_scan_context(
             fid, fname = named
             if _manuscript_text_if_target(fid) is not None:
                 logger.info("Loaded-docs: '%s' is the loaded manuscript; already in context", fname)
+                _keep_ack = {"kind": "manuscript", "name": fname}
             else:
                 text = await _download_and_parse_file(fid, fname)
                 if text:
@@ -1026,6 +1037,7 @@ async def _prepare_scan_context(
             fname = current_file.get("name", "unknown")
             if _manuscript_text_if_target(fid) is not None:
                 logger.info("Loaded-docs: current tab '%s' is the loaded manuscript; already in context", fname)
+                _keep_ack = {"kind": "manuscript", "name": fname}
             else:
                 text = await _download_and_parse_file(fid, fname)
                 if text:
@@ -1040,6 +1052,7 @@ async def _prepare_scan_context(
     elif intent == "keep_manuscript":
         # The manuscript is already _current_doc (in context every turn).
         logger.info("Loaded-docs: manuscript already in context as _current_doc")
+        _keep_ack = {"kind": "manuscript", "name": _current_doc_file_name or "the manuscript"}
     elif intent == "remove_named":
         named = _match_named_file(message)
         if named:
@@ -1248,7 +1261,7 @@ def _build_user_message(
     clarification_text: Optional[str] = None,
 ) -> str:
     """Build the enriched user message with retrieved context."""
-    global _current_doc, _current_comments, _image_cache, _last_kept_doc_name
+    global _current_doc, _current_comments, _image_cache, _keep_ack
 
     parts = []
 
@@ -1415,28 +1428,49 @@ def _build_user_message(
             "keep a file, treat it as a fresh request.\n"
         )
 
-    # Scan-and-keep confirmation: when a file was just kept this request, ask
-    # the model to acknowledge it and list every file currently kept — so the
-    # user gets a clear "scanned + here's what's in context" signal (and the
-    # model doesn't claim the file was already loaded).
-    if _last_kept_doc_name:
-        kept_names = [d["name"] for d in _loaded_docs]
-        n = len(kept_names)
-        # Numbered listing so the model reproduces the COMPLETE list (every
-        # kept file, no omissions) rather than paraphrasing and dropping some.
+    # Scan-and-keep confirmation: when a keep happened (or the user asked to
+    # keep the already-loaded manuscript), acknowledge it honestly and list
+    # EVERY file currently in context — the auto-loaded manuscript plus all
+    # kept docs — so the user gets a complete "here's what's in context"
+    # signal and the model neither confabulates a success for the manuscript
+    # nor under-reports the kept set.
+    if _keep_ack:
+        kind = _keep_ack["kind"]
+        ack_name = _keep_ack["name"]
+        # Full in-context listing: the manuscript (auto-loaded, NOT in
+        # _loaded_docs) first, then every kept doc.
+        in_context: list[str] = []
+        if _current_doc is not None:
+            ms_label = _current_doc_file_name or "the main manuscript"
+            in_context.append(f"{ms_label} (manuscript — auto-loaded)")
+        in_context.extend(d["name"] for d in _loaded_docs)
+        n = len(in_context)
         listing = "\n".join(
-            f"{i + 1}. {name}" for i, name in enumerate(kept_names)
-        ) if kept_names else "(none)"
+            f"{i + 1}. {label}" for i, label in enumerate(in_context)
+        ) if in_context else "(none)"
         parts.append("## Scan Confirmation\n")
-        parts.append(
-            f"You just successfully scanned and kept **{_last_kept_doc_name}** in "
-            f"context. Reply with a one-line confirmation naming this file, then "
-            f"list EVERY file currently kept in context — there are {n} total and "
-            f"you must name all {n}, omitting none:\n{listing}\n"
-            f"Be brief by NOT dumping or summarizing file contents — but the file "
-            f"LIST above must be complete. Then wait for the user's next request.\n"
-        )
-        _last_kept_doc_name = None  # one-shot — only confirm on the keep turn
+        if kind == "manuscript":
+            parts.append(
+                f"The user asked to keep **{ack_name}**, but that is the loaded "
+                f"manuscript — it is ALREADY in context (auto-loaded on Load Project "
+                f"and present every turn), so it does not need to be kept separately. "
+                f"Do NOT claim it was 'scanned and kept just now'; tell the user "
+                f"honestly that it was already loaded. Then list EVERY file currently "
+                f"in context — there are {n} total and you must name all {n}, omitting "
+                f"none:\n{listing}\n"
+                f"Be brief by NOT dumping file contents; the file LIST must be "
+                f"complete. Then wait for the user's next request.\n"
+            )
+        else:  # a doc was just kept
+            parts.append(
+                f"You just successfully scanned and kept **{ack_name}** in context. "
+                f"Reply with a one-line confirmation naming this file, then list "
+                f"EVERY file currently in context — there are {n} total and you must "
+                f"name all {n}, omitting none:\n{listing}\n"
+                f"Be brief by NOT dumping file contents; the file LIST must be "
+                f"complete. Then wait for the user's next request.\n"
+            )
+        _keep_ack = None  # one-shot — only confirm on the keep turn
 
     # Web-scraped papers (accumulate separately from Drive context)
     global _scraped_docs, _scraped_sources
@@ -2304,7 +2338,7 @@ async def reset_all_state():
     global _project_file_index
     global _awaiting_doc_choice
     global _awaiting_scan_confirmation, _scan_preference
-    global _current_doc_file_id
+    global _current_doc_file_id, _current_doc_file_name
     global _loaded_docs
     global _last_turn_scan_chars
     global _last_request_tokens, _last_request_system_tokens, _last_request_user_tokens
@@ -2349,6 +2383,7 @@ async def reset_all_state():
         _awaiting_scan_confirmation = False
         _scan_preference = ""
         _current_doc_file_id = ""
+        _current_doc_file_name = ""
         _loaded_docs = []
         _last_turn_scan_chars = 0
         _last_request_tokens = 0
@@ -2380,7 +2415,7 @@ async def unload_project():
     global _project_file_index
     global _awaiting_doc_choice
     global _awaiting_scan_confirmation, _scan_preference
-    global _current_doc_file_id
+    global _current_doc_file_id, _current_doc_file_name
     global _loaded_docs
     global _last_turn_scan_chars
     global _last_request_tokens, _last_request_system_tokens, _last_request_user_tokens
@@ -2420,6 +2455,7 @@ async def unload_project():
         _awaiting_scan_confirmation = False
         _scan_preference = ""
         _current_doc_file_id = ""
+        _current_doc_file_name = ""
         _loaded_docs = []
         _last_turn_scan_chars = 0
         _last_request_tokens = 0
