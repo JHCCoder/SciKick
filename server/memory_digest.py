@@ -107,6 +107,69 @@ async def _call_llm(message: str) -> str:
     )
 
 
+_SUMMARY_SYSTEM_PROMPT = (
+    "You write extremely concise research-project summaries. Output ONLY the "
+    "summary prose — no preamble, no labels, no markdown. At most two sentences."
+)
+
+# Cap each sampled excerpt so the prompt stays tiny (this runs on every Load
+# Project). We only need enough to characterize the project.
+_SAMPLE_CHAR_CAP = 1200
+
+
+async def generate_project_summary(
+    title: str, samples: list[tuple[str, str]]
+) -> str:
+    """Infer a ≤2-sentence project summary from the manuscript title + excerpts.
+
+    ``samples`` is a list of (label, text) tuples — e.g. the first chunk of
+    each parsed project file. Reuses the chat handler's provider routing
+    (same provider/model the user configured for chat). Raises on failure so
+    the caller can fall back to the title/filename.
+    """
+    from chat_handler import (
+        _get_provider,
+        _is_anthropic_provider,
+        _sync_anthropic,
+        _sync_openai_compatible,
+    )
+
+    excerpts = []
+    for label, text in samples:
+        text = (text or "").strip()
+        if not text:
+            continue
+        excerpts.append(f"[{label}]\n{text[:_SAMPLE_CHAR_CAP]}")
+    excerpt_block = "\n\n".join(excerpts[:8]) or "(no excerpts available)"
+
+    message = (
+        f"Manuscript title: {title or '(unknown)'}\n\n"
+        f"File excerpts:\n{excerpt_block}\n\n"
+        "In at most two sentences, summarize what this research project is "
+        "about — the topic, organism/system, and main question or contribution "
+        "— as inferred from the title and excerpts. Be specific and succinct. "
+        "Output only the summary."
+    )
+
+    provider = _get_provider()
+    if _is_anthropic_provider(provider["provider"]):
+        text = await _sync_anthropic(
+            message, _SUMMARY_SYSTEM_PROMPT, provider["model"], provider["api_key"]
+        )
+    else:
+        text = await _sync_openai_compatible(
+            message,
+            _SUMMARY_SYSTEM_PROMPT,
+            provider["model"],
+            provider["api_key"],
+            provider["base_url"],
+        )
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("empty summary from LLM")
+    return text
+
+
 def _parse_json(text: str) -> Optional[dict]:
     """Parse JSON from an LLM response, tolerating surrounding prose/fences."""
     if not text:

@@ -575,20 +575,21 @@ async def load_context(folder_id: str, force: bool = False):
     from file_processor import (
         PaperDocument,
         ReviewerComment,
-        parse_pdf,
-        parse_docx,
-        parse_text,
         extract_reviewer_comments,
         extract_reviewer_comments_from_sheets,
     )
     from chat_handler import (
         set_project_context,
         set_project_file_index,
+        set_project_docs,
+        set_project_summary,
         _current_doc,
         _current_comments,
         _current_doc_source,
         _focused_file_cache,
         _loaded_docs,
+        _project_docs,
+        _project_summary,
     )
 
     # 1. Initialise or retrieve memory
@@ -673,6 +674,7 @@ async def load_context(folder_id: str, force: bool = False):
             "comment_files_processed": [],
             "files_changed": 0,
             "files_skipped": len(all_files),
+            "summary": _project_summary,
         }
 
     if force:
@@ -708,24 +710,7 @@ async def load_context(folder_id: str, force: bool = False):
     else:
         logger.info("load-context: parsing manuscript '%s' (%s)", name, manuscript_file["mimeType"])
         manuscript_content = await download_file(ms_id)
-        mime = manuscript_file["mimeType"]
-
-        if mime == "application/pdf":
-            content_bytes = bytes.fromhex(manuscript_content["content_bytes"])
-            doc = parse_pdf(content_bytes, name)
-        elif mime in ("application/vnd.openxmlformats-officedocument.wordprocessingml.document",):
-            content_bytes = bytes.fromhex(manuscript_content["content_bytes"])
-            doc = parse_docx(content_bytes, name)
-        elif mime == "text/markdown" or "text" in manuscript_content:
-            doc = parse_text(manuscript_content.get("text", ""), name)
-        else:
-            content_bytes = bytes.fromhex(manuscript_content.get("content_bytes", ""))
-            if name.endswith(".pdf"):
-                doc = parse_pdf(content_bytes, name)
-            elif name.endswith(".docx"):
-                doc = parse_docx(content_bytes, name)
-            else:
-                doc = parse_text(content_bytes.decode("utf-8", errors="replace"), name)
+        doc = _parse_downloaded(manuscript_file, manuscript_content)
 
     # 5. Find and extract reviewer comments (only from changed/new files)
     comments: list[ReviewerComment] = []
@@ -792,6 +777,87 @@ async def load_context(folder_id: str, force: bool = False):
     set_project_context(doc, comments, images, source=f"drive:{folder_id}", doc_file_id=ms_id, doc_file_name=name)
     set_project_file_index(all_files, manuscript_file_id=ms_id)  # file name→id index + classified structure summary
 
+    # 7.5 Parse every OTHER text-bearing file (supplements, supporting docs)
+    # so its chunks are searchable each turn. The manuscript (ms_id), the
+    # reviewer-comment files (already parsed into structured comments above),
+    # images, the memory file, and non-text-parseable ('miscellaneous') files
+    # are skipped. Downloads run with a bounded concurrency to keep the event
+    # loop responsive; each file is guarded so one failure can't abort the load.
+    comment_ids = {cf["id"] for cf in comment_files}
+    image_ids = {f["id"] for f in image_files}
+    handled_ids = {ms_id} | comment_ids | image_ids | {memory_file} - {None}
+
+    # Reuse parses from the previous load for unchanged files (within a running
+    # session; on restart _project_docs is empty so everything re-parses).
+    cached_by_id = {d["file_id"]: d for d in _project_docs if d.get("file_id")}
+
+    async def _parse_one(f: dict):
+        fid = f["id"]
+        fname = f["name"]
+        ftype = classify_project_file(fname, f.get("mimeType", ""), ms_id, fid)
+        # Only 'supporting'/'supplement' text files go through here — the
+        # manuscript is _current_doc, comments are structured, miscellaneous
+        # (binary) files have no text to extract.
+        if ftype not in ("supporting", "supplement"):
+            return None
+        if int(f.get("size", 0) or 0) > _MAX_PARSE_BYTES:
+            logger.info("load-context: skipping %s (size > %d bytes)", fname, _MAX_PARSE_BYTES)
+            return None
+        # Reuse the cached parse when the file is unchanged on a reload.
+        cached = cached_by_id.get(fid)
+        if (
+            cached is not None
+            and not force
+            and fid not in new_ids
+            and fid not in changed_ids
+        ):
+            return {"file_id": fid, "name": fname, "type": ftype, "doc": cached["doc"]}
+        try:
+            downloaded = await download_file(fid)
+            parsed = _parse_downloaded(f, downloaded)
+            logger.info("load-context: parsed '%s' (%s, %d chars)",
+                        fname, ftype, len(parsed.full_text))
+            return {"file_id": fid, "name": fname, "type": ftype, "doc": parsed}
+        except Exception as exc:
+            logger.warning("load-context: failed to parse %s: %s", fname, exc)
+            # Fall back to a cached parse if we have one, else skip.
+            if cached is not None:
+                return {"file_id": fid, "name": fname, "type": ftype, "doc": cached["doc"]}
+            return None
+
+    sem = asyncio.Semaphore(4)
+
+    async def _bounded(f: dict):
+        async with sem:
+            return await _parse_one(f)
+
+    parse_candidates = [f for f in all_files if f["id"] not in handled_ids and f["id"]]
+    results = await asyncio.gather(*[_bounded(f) for f in parse_candidates])
+    extra_docs = [r for r in results if r is not None]
+    set_project_docs(extra_docs)
+    logger.info("load-context: parsed %d non-manuscript text file(s)", len(extra_docs))
+
+    # 7.6 Best-effort project summary (≤2 sentences) from the manuscript title
+    # + a small sample of each parsed file. Times out / falls back to the title
+    # so this can never block or fail the load.
+    summary_text = doc.title or name
+    try:
+        from memory_digest import generate_project_summary
+        samples = [(d["name"], d["doc"].full_text[:1500]) for d in extra_docs]
+        # Lead with the manuscript excerpt so the summary reflects the main text.
+        samples.insert(0, (name, doc.full_text[:1500]))
+        summary_text = await asyncio.wait_for(
+            generate_project_summary(doc.title or name, samples), timeout=30
+        )
+        logger.info("load-context: project summary: %s", summary_text[:200])
+    except asyncio.TimeoutError:
+        logger.warning("load-context: summary timed out — using title fallback")
+        summary_text = doc.title or name
+    except Exception as exc:
+        logger.warning("load-context: summary failed (%s) — using title fallback", exc)
+        summary_text = doc.title or name
+    set_project_summary(summary_text)
+
     # 8. Update memory with paper sections, comment states, and file snapshots
     update_paper_sections([
         {"heading": s.heading, "content": s.content}
@@ -844,6 +910,19 @@ async def load_context(folder_id: str, force: bool = False):
         "images_cached": len(images),
         "comment_files_processed": [cf["name"] for cf in changed_comment_files],
         "comment_files_skipped": [cf["name"] for cf in skipped_comment_files],
+        "summary": summary_text,
+        "parsed_files": {
+            "manuscript": 1,
+            "comments": len(comment_files),
+            "supplement": sum(1 for d in extra_docs if d["type"] == "supplement"),
+            "supporting": sum(1 for d in extra_docs if d["type"] == "supporting"),
+            "miscellaneous": sum(
+                1 for f in all_files
+                if f["id"] not in handled_ids
+                and f["id"]
+                and not _is_text_parseable(f["name"], f.get("mimeType", ""))
+            ),
+        },
     }
 
 
@@ -871,16 +950,50 @@ COMMENT_KEYWORDS = [
     "referee", "response", "decision",
 ]
 
+# MIME types / extensions we can extract readable text from. Files outside
+# this set (images, videos, archives, unknown binaries) are classed
+# 'miscellaneous' and never parsed — there's no text to retrieve.
+_TEXT_PARSEABLE_MIMES = {
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
+    "text/plain",
+    "text/markdown",
+    "application/vnd.google-apps.document",        # Google Doc → exported as markdown
+    "application/vnd.google-apps.spreadsheet",     # Google Sheet → rows
+    "application/vnd.google-apps.presentation",    # exported as PDF
+}
+_TEXT_PARSEABLE_EXTS = (
+    ".pdf", ".docx", ".txt", ".md", ".markdown", ".csv", ".tsv",
+    ".py", ".r", ".sh", ".tex", ".bib", ".json", ".xml", ".html", ".htm",
+)
+
+# Skip files larger than this when parsing non-manuscript docs — protects the
+# event loop from pathological binary blobs mis-detected as text. The
+# manuscript is exempt (it's always parsed); this only guards the "parse every
+# other file" pass.
+_MAX_PARSE_BYTES = 50 * 1024 * 1024
+
+
+def _is_text_parseable(name: str, mime: str) -> bool:
+    """True if we have a parser that can extract text from this file."""
+    if mime in _TEXT_PARSEABLE_MIMES:
+        return True
+    return name.lower().endswith(_TEXT_PARSEABLE_EXTS)
+
 
 def classify_project_file(
     name: str, mime: str, manuscript_file_id: str, file_id: str
 ) -> str:
     """Classify a project file for the structure summary.
 
-    Returns one of 'manuscript', 'supplement', 'reviewer_comment', 'other'.
-    The manuscript is identified by Drive file id (the file _find_manuscript
-    picked); the rest by filename keywords. Used only for the lazy structure
-    overview shown to the model — does NOT parse or load the file.
+    Returns one of 'manuscript', 'supplement', 'reviewer_comment',
+    'supporting', 'miscellaneous'. The manuscript is identified by Drive file
+    id (the file _find_manuscript picked); supplements and reviewer-comment
+    files by filename keywords. Remaining files split into 'supporting' (we
+    can extract text from them — data, code, notes, drafts) or
+    'miscellaneous' (binary/unreadable: images, archives, unknown). Used for
+    the structure overview shown to the model and to decide which files to
+    chunk on Load Project.
     """
     if manuscript_file_id and file_id == manuscript_file_id:
         return "manuscript"
@@ -893,7 +1006,44 @@ def classify_project_file(
         kw in n for kw in ("manuscript", "paper", "draft", "article")
     ):
         return "reviewer_comment"
-    return "other"
+    return "supporting" if _is_text_parseable(name, mime) else "miscellaneous"
+
+
+def _parse_downloaded(file_dict: dict, downloaded: dict):
+    """Dispatch a downloaded Drive file to the right text parser.
+
+    Shared by the manuscript path and the "parse every other text file" pass
+    in load_context. ``downloaded`` is the dict returned by download_file()
+    (keys vary by type: ``content_bytes`` hex for binaries, ``text`` for
+    Google Docs, ``sheets`` for Google Sheets). Returns a PaperDocument.
+    """
+    from file_processor import parse_pdf, parse_docx, parse_text
+
+    name = file_dict["name"]
+    mime = file_dict.get("mimeType", "")
+    size = int(file_dict.get("size", 0) or 0)
+
+    if mime == "application/pdf":
+        return parse_pdf(bytes.fromhex(downloaded["content_bytes"]), name)
+    if mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        return parse_docx(bytes.fromhex(downloaded["content_bytes"]), name)
+    if mime == "text/markdown" or "text" in downloaded:
+        return parse_text(downloaded.get("text", ""), name)
+    if "sheets" in downloaded:
+        # Flatten a Google Sheet into text so it chunks like any other doc.
+        lines = []
+        for sheet_name, rows in downloaded["sheets"].items():
+            lines.append(f"[{sheet_name}]")
+            for row in rows:
+                lines.append("\t".join(str(c) for c in row))
+        return parse_text("\n".join(lines), name)
+    # Binary fallback: try to decode, else pick a parser by extension.
+    content_bytes = bytes.fromhex(downloaded.get("content_bytes", ""))
+    if name.lower().endswith(".pdf"):
+        return parse_pdf(content_bytes, name)
+    if name.lower().endswith(".docx"):
+        return parse_docx(content_bytes, name)
+    return parse_text(content_bytes.decode("utf-8", errors="replace"), name)
 
 
 def _find_manuscript(files: list[dict]) -> Optional[dict]:

@@ -26,7 +26,6 @@ from context_engine import (
     retrieve_context,
 )
 from memory_manager import (
-    Decision,
     build_resume_context,
     get_current_memory,
     update_memory_after_chat,
@@ -76,12 +75,27 @@ _project_file_index: dict[str, list[dict]] = {}
 
 # Classified project structure — a list of {file_id, name, type, size, mime}
 # for EVERY file in the loaded Drive folder, where type is one of
-# 'manuscript' | 'supplement' | 'reviewer_comment' | 'other'. Built from the
-# file listing (names + the detected manuscript id) WITHOUT parsing the files
-# — a lazy structural overview shown to the model so it knows what's in the
-# project. Nothing here is loaded into _loaded_docs or considered "scanned";
-# files are still parsed on demand only when the user scans/keeps them.
+# 'manuscript' | 'supplement' | 'reviewer_comment' | 'supporting' |
+# 'miscellaneous'. Built from the file listing (names + the detected
+# manuscript id). 'supporting' files are also parsed into _project_docs
+# (below) so their chunks are searchable each turn; 'miscellaneous' files
+# (images, archives, binaries) are listed but not parsed.
 _project_structure: list[dict] = []
+
+# Parsed non-manuscript project files: list of
+# {"file_id", "name", "type", "doc": PaperDocument}. Populated on Load
+# Project by drive_sync for every text-bearing supporting/supplement file.
+# retrieve_context searches these each turn with a type-weighted chunk budget
+# (manuscript + reviewer comments get the most). The manuscript itself stays
+# in _current_doc; reviewer comments stay in _current_comments. Cleared on
+# /reset and /unload-project.
+_project_docs: list[dict] = []
+
+# One/two-line project summary inferred at Load Project from the manuscript
+# title + sampled chunks (best-effort LLM call; falls back to the title).
+# Shown in the side panel's load message and injected into the system prompt
+# so the model knows the project at a glance. Regenerated each load.
+_project_summary: str = ""
 
 # Set True after the server injects a "which document do you want me to scan?"
 # clarification. The next user message is then treated as the document choice
@@ -237,6 +251,29 @@ def set_project_context(
         source,
         doc_file_id or "(none)",
     )
+
+
+def set_project_docs(docs: list[dict]) -> None:
+    """Store the parsed non-manuscript project files (supplements/supporting).
+
+    Called by drive_sync after the per-file parse pass on Load Project. Each
+    entry is {"file_id", "name", "type", "doc": PaperDocument}. Replaces the
+    previous set (a folder switch drops the old project's docs).
+    """
+    global _project_docs
+    _project_docs = list(docs)
+    if _project_docs:
+        by_type: dict[str, int] = {}
+        for d in _project_docs:
+            by_type[d["type"]] = by_type.get(d["type"], 0) + 1
+        breakdown = ", ".join(f"{c} {t}" for t, c in sorted(by_type.items()))
+        logger.info("Project docs: %d parsed (%s)", len(_project_docs), breakdown)
+
+
+def set_project_summary(summary: str) -> None:
+    """Store the load-time project summary (shown in panel + system prompt)."""
+    global _project_summary
+    _project_summary = summary or ""
 
 
 # ---------------------------------------------------------------------------
@@ -426,10 +463,18 @@ def _build_system_prompt() -> str:
     except Exception:
         pass
 
-    # Classified project structure — a lazy metadata overview of every file in
-    # the loaded Drive folder (no file contents). Tells the model what's in the
+    # Succinct project summary inferred at Load Project from the manuscript
+    # title + sampled chunks. Gives the model a one-glance sense of what the
+    # project is about before any retrieval.
+    if _project_summary:
+        prompt += f"\n\n## Project Summary\n{_project_summary}\n"
+
+    # Classified project structure — a metadata overview of every file in the
+    # loaded Drive folder (names + types only). Tells the model what's in the
     # project so it can answer "what files are in this project?" and route
-    # scan/keep requests accurately. Nothing here is loaded into context.
+    # scan/keep requests accurately. Text-bearing files are also parsed and
+    # chunk-searched each turn (see _project_docs); only 'miscellaneous'
+    # (binary) files are listed-but-unreadable.
     if _project_structure:
         def _human_size(n: int) -> str:
             if not n:
@@ -446,7 +491,7 @@ def _build_system_prompt() -> str:
         ]
         structure_block = (
             "\n\n## Project Structure\n"
-            "Files in this project (classified, NOT auto-loaded into context):\n"
+            "Files in this project (classified):\n"
             + "\n".join(lines)
             + "\n"
         )
@@ -457,9 +502,11 @@ def _build_system_prompt() -> str:
                     f"Manuscript section headings: {headings}\n"
                 )
         structure_block += (
-            "The manuscript is auto-loaded and searched by keyword each turn "
-            "(top matching chunks). Other files are NOT in context until the "
-            "user scans/keeps them (e.g. \"scan and keep <file> in context\"). "
+            "Each turn the top keyword-matching chunks are pulled automatically "
+            "from the manuscript and reviewer comments (weighted heaviest), and "
+            "from supplements/supporting files (lighter). 'miscellaneous' files "
+            "(images, archives) are listed but not text-searchable. The user can "
+            "also scan-and-keep any file to load its full text every turn. "
             "If the user asks what's in the project, answer from this list.\n"
         )
         prompt += structure_block
@@ -1490,12 +1537,24 @@ def _build_user_message(
         # skip the top-k paper-chunk retrieval (redundant) — still pull
         # reviewer comments and recent chat history.
         skip_paper_chunks = bool(full_manuscript_content) or _manuscript_is_kept()
+        # Non-manuscript project docs are chunk-searched every turn with a
+        # type-weighted budget (supplements/supporting). Exclude any file the
+        # user already kept in _loaded_docs — its full text is injected
+        # separately below, so chunk-retrieving it would be redundant.
+        kept_ids = {d["file_id"] for d in _loaded_docs}
+        extra_docs = [
+            (d["type"], d["doc"])
+            for d in _project_docs
+            if d.get("file_id") not in kept_ids
+        ]
         context = retrieve_context(
             query=message,
             doc=_current_doc,
             comments=_current_comments,
             chat_history=[t.model_dump() for t in chat_history],
             include_paper_chunks=not skip_paper_chunks,
+            extra_docs=extra_docs,
+            extra_budget={"supplement": 2, "supporting": 2, "miscellaneous": 1},
         )
         if context:
             parts.append(context)
@@ -2262,72 +2321,114 @@ async def context_usage():
         "scraped_total_chars": sum(len(doc.full_text) for doc in _scraped_docs),
         "loaded_docs_count": len(_loaded_docs),
         "loaded_docs": [{"name": d["name"], "chars": len(d["text"])} for d in _loaded_docs],
+        "project_docs_count": len(_project_docs),
+        "project_docs": [
+            {"name": d["name"], "type": d["type"], "chars": len(d["doc"].full_text)}
+            for d in _project_docs
+        ],
     }
 
 
 @router.post("/refresh-context")
 async def refresh_context():
-    """
-    Save the current conversation summary to memory, clear chat history,
-    and return the freed context window.
+    """Condense loaded context to memory, then drop it to free the window.
 
-    Useful when the context window is filling up — important decisions
-    and comment statuses are preserved in the memory file on Drive.
+    The button next to the context bar. The big per-turn context consumers
+    are the kept docs (_loaded_docs, injected in full every turn) and scraped
+    papers (_scraped_docs). This endpoint:
+
+    1. Condenses — runs the LLM digest (flush_memory_if_dirty) so the
+       conversation about those docs becomes structured memory (decisions,
+       summary, active_context), and records the reviewed file names in
+       active_context so the model remembers what was looked at after the
+       docs are gone.
+    2. Drops — clears _loaded_docs, _scraped_docs, _scraped_sources, and the
+       one-shot _focused_file_cache, plus stale scan-flow flags. The Loaded
+       Documents and Scraped Articles panels empty and the window frees up.
+
+    The displayed chat and the project baseline (manuscript _current_doc,
+    project docs, comments) are left intact — use Clear Chat / Unload Project
+    for those.
     """
+    global _loaded_docs, _scraped_docs, _scraped_sources, _focused_file_cache
+    global _keep_ack, _awaiting_doc_choice, _awaiting_scan_confirmation, _scan_preference
+    global _last_request_tokens, _last_request_system_tokens, _last_request_user_tokens
+
     memory = get_current_memory()
     if memory is None:
         return {"status": "no_memory", "message": "No active session to refresh."}
 
-    # Save a snapshot of the current conversation state
+    # Snapshot what's about to be dropped (read under no lock — atomic refs).
+    dropped_doc_names = [d["name"] for d in _loaded_docs]
+    dropped_scraped_titles = [doc.title or doc.__class__.__name__ for doc in _scraped_docs]
+    focused_cleared = len(_focused_file_cache)
+
+    # 1. Condense — digest any pending chat exchanges into structured memory.
+    memory_flushed = False
+    try:
+        from memory_manager import flush_memory_if_dirty
+        memory_flushed = await flush_memory_if_dirty()
+    except Exception as exc:
+        logger.warning("refresh-context: memory digest failed (non-fatal): %s", exc)
+
+    # Record what was reviewed in active_context so it survives the drop.
     now = datetime.now(timezone.utc).isoformat()
-
-    # Summarise what was discussed
-    if memory.chat_history:
-        user_messages = [t for t in memory.chat_history if t.role == "user"]
-        topics = [t.content[:200] for t in user_messages[-5:]]
-        summary = "Topics discussed:\n" + "\n".join(f"- {t}" for t in topics)
-    else:
-        summary = "No conversation to summarise."
-
-    memory.conversation_summary = summary
+    note_parts = [f"Context condensed {now[:10]} — dropped from active context:"]
+    if dropped_doc_names:
+        note_parts.append("  kept docs: " + ", ".join(dropped_doc_names))
+    if dropped_scraped_titles:
+        note_parts.append("  scraped articles: " + ", ".join(dropped_scraped_titles))
+    if not dropped_doc_names and not dropped_scraped_titles:
+        note_parts.append("  (no loaded docs or scraped articles were held)")
+    note = "\n".join(note_parts)
+    existing = (memory.active_context or "").strip()
+    memory.active_context = (existing + "\n" + note) if existing else note
     memory.last_updated = now
 
-    # Build a compact decision log from recent chat
-    recent_decisions = []
-    for t in memory.chat_history[-10:]:
-        if t.role == "assistant" and any(
-            kw in t.content.lower()
-            for kw in ["decided", "decision", "agreed", "we will", "let's", "plan:"]
-        ):
-            recent_decisions.append(
-                Decision(date=now, decision=t.content[:500])
-            )
-    if recent_decisions:
-        memory.decisions.extend(recent_decisions)
-
-    # Save the old turn count for the response
-    old_turns = len(memory.chat_history)
-
-    # Clear chat history to free context window
-    memory.chat_history = []
-
-    # Save locally and sync to Drive
+    # Persist memory (local + Drive) BEFORE clearing the live context, so a
+    # crash between the two can't lose the condensation.
     _save_local(memory)
     if memory.project_folder_id:
         try:
             from drive_sync import _save_memory_to_drive
             await _save_memory_to_drive(memory.project_folder_id, memory.model_dump())
         except Exception as exc:
-            logger.warning("refresh-context: Drive sync failed: %s", exc)
+            logger.warning("refresh-context: Drive sync failed (non-fatal): %s", exc)
 
-    # Return new context usage
+    # 2. Drop — clear the heavy per-turn full-text injections + stale scan state.
+    async with _state_lock:
+        _loaded_docs = []
+        _scraped_docs = []
+        _scraped_sources = []
+        _focused_file_cache = {}
+        _keep_ack = None
+        _awaiting_doc_choice = False
+        _awaiting_scan_confirmation = False
+        _scan_preference = ""
+        # The last-request token measurement is now stale (the state it
+        # measured is gone). Reset it so context_usage() falls back to the
+        # standing projection — which recomputes from the cleared state and
+        # shows the freed window immediately, instead of the old measurement
+        # lingering until the next send.
+        _last_request_tokens = 0
+        _last_request_system_tokens = 0
+        _last_request_user_tokens = 0
+
+    logger.info(
+        "refresh-context: dropped %d loaded doc(s), %d scraped article(s), %d focused cache entr(ies); memory_flushed=%s",
+        len(dropped_doc_names), len(dropped_scraped_titles), focused_cleared, memory_flushed,
+    )
+
     usage = await context_usage()
 
     return {
         "status": "refreshed",
-        "turns_cleared": old_turns,
-        "decisions_saved": len(recent_decisions),
-        "summary": summary[:500],
+        "memory_flushed": memory_flushed,
+        "dropped_docs": dropped_doc_names,
+        "dropped_docs_count": len(dropped_doc_names),
+        "dropped_scraped": dropped_scraped_titles,
+        "dropped_scraped_count": len(dropped_scraped_titles),
+        "note": note,
         "context": usage,
     }
 
@@ -2382,6 +2483,11 @@ async def get_context():
         "images": images,
         "scraped_papers": scraped_papers,
         "loaded_docs": [{"name": d["name"], "chars": len(d["text"])} for d in _loaded_docs],
+        "project_summary": _project_summary,
+        "project_docs": [
+            {"name": d["name"], "type": d["type"], "chars": len(d["doc"].full_text)}
+            for d in _project_docs
+        ],
     }
 
 
@@ -2435,6 +2541,7 @@ async def reset_all_state():
     global _scraped_docs, _scraped_sources
     global _focused_file_cache
     global _project_file_index, _project_structure
+    global _project_docs, _project_summary
     global _awaiting_doc_choice
     global _awaiting_scan_confirmation, _scan_preference
     global _current_doc_file_id, _current_doc_file_name
@@ -2479,6 +2586,8 @@ async def reset_all_state():
         _focused_file_cache = {}
         _project_file_index = {}
         _project_structure = []
+        _project_docs = []
+        _project_summary = ""
         _awaiting_doc_choice = False
         _awaiting_scan_confirmation = False
         _scan_preference = ""
@@ -2513,6 +2622,7 @@ async def unload_project():
     global _current_doc, _current_comments, _image_cache, _current_doc_source
     global _focused_file_cache
     global _project_file_index, _project_structure
+    global _project_docs, _project_summary
     global _awaiting_doc_choice
     global _awaiting_scan_confirmation, _scan_preference
     global _current_doc_file_id, _current_doc_file_name
@@ -2552,6 +2662,8 @@ async def unload_project():
         _current_doc_source = ""
         _project_file_index = {}
         _project_structure = []
+        _project_docs = []
+        _project_summary = ""
         _awaiting_doc_choice = False
         _awaiting_scan_confirmation = False
         _scan_preference = ""

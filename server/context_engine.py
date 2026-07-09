@@ -177,6 +177,8 @@ def retrieve_context(
     chat_history: list[dict] = None,
     max_chunks: int = 3,
     include_paper_chunks: bool = True,
+    extra_docs: list = None,
+    extra_budget: dict = None,
 ) -> str:
     """
     Given a user query, return the most relevant context string to inject.
@@ -187,6 +189,9 @@ def retrieve_context(
       used when the caller is already injecting the full manuscript text, so
       the top-k chunks would be redundant noise)
     - The most relevant reviewer comments
+    - The most relevant chunks from extra_docs (other parsed project files:
+      supplements/supporting), each capped by extra_budget[type] so the
+      manuscript and reviewer comments stay weighted heaviest
     - Recent chat history summary
     """
     query_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", query.lower()))
@@ -235,6 +240,35 @@ def retrieve_context(
     comment_scores.sort(key=lambda x: x[0], reverse=True)
     top_comments = comment_scores[:5]
 
+    # Score chunks from other parsed project files (supplements/supporting).
+    # Each (type, doc) is chunked and scored with the same keyword-overlap
+    # method; per-type budget keeps the manuscript + comments heaviest.
+    # Returns list of (name, type, [chunks]).
+    extra_selected = []
+    if extra_docs:
+        budget = extra_budget or {}
+        for ftype, fdoc in extra_docs:
+            if fdoc is None or not getattr(fdoc, "full_text", ""):
+                continue
+            limit = budget.get(ftype, 1)
+            if limit <= 0:
+                continue
+            echunks = chunk_paper_for_context(fdoc)
+            escores = []
+            for i, chunk in enumerate(echunks):
+                cwords = set(re.findall(r"\b[a-zA-Z]{3,}\b", chunk.lower()))
+                if not cwords:
+                    continue
+                overlap = len(query_words & cwords)
+                if overlap == 0:
+                    continue
+                escores.append((overlap / len(query_words), chunk))
+            escores.sort(key=lambda x: x[0], reverse=True)
+            picked = [c for _, c in escores[:limit]]
+            if picked:
+                fname = getattr(fdoc, "title", "") or fdoc.__class__.__name__
+                extra_selected.append((fname, ftype, picked))
+
     # Build context string
     parts = []
 
@@ -254,6 +288,12 @@ def retrieve_context(
                 f"**{comment.reviewer} ({comment.severity}){status_str}:** {comment.text[:1500]}\n"
             )
 
+    for fname, ftype, picked in extra_selected:
+        parts.append(f"## Relevant Excerpts — {fname} ({ftype})\n")
+        for chunk in picked:
+            parts.append(chunk[:2500])
+            parts.append("\n---\n")
+
     if chat_history:
         parts.append("## Recent Conversation\n")
         for turn in chat_history[-6:]:  # last 3 exchanges
@@ -262,8 +302,9 @@ def retrieve_context(
             parts.append(f"**{role}:** {content}\n")
 
     context = "\n".join(parts)
-    logger.info("Retrieved context: %d chunks, %d comments (%d chars)",
-                 len(top_chunks), len(top_comments), len(context))
+    logger.info("Retrieved context: %d chunks, %d comments, %d extra-doc chunks (%d chars)",
+                 len(top_chunks), len(top_comments),
+                 sum(len(p) for _, _, p in extra_selected), len(context))
 
     return context
 

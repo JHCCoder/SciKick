@@ -528,11 +528,23 @@ async function loadProject() {
       });
       if (loadRes.ok) {
         const loadData = await loadRes.json();
+        // Best-effort: surface the load-time project summary and parsed-file
+        // breakdown when present. Guarded so an older server (no summary field)
+        // can't break the load path.
+        const summaryLine = loadData.summary ? `📝 **Project summary**: ${loadData.summary}\n\n` : "";
+        const pf = loadData.parsed_files || {};
+        const pfParts = [];
+        if (pf.supplement) pfParts.push(`${pf.supplement} supplement`);
+        if (pf.supporting) pfParts.push(`${pf.supporting} supporting`);
+        if (pf.miscellaneous) pfParts.push(`${pf.miscellaneous} misc`);
+        const pfLine = pfParts.length ? `\nParsed files: ${pfParts.join(", ")}` : "";
         showSystemMessage(
+          summaryLine +
           `📄 **Manuscript loaded**: ${loadData.manuscript.title || loadData.manuscript.name}\n` +
           `Sections: ${loadData.manuscript.sections.join(", ")}\n` +
           `Figures found: ${loadData.manuscript.figures.length}\n` +
-          `Files in project: ${loadData.comments.count || 0}`
+          `Files in project: ${loadData.comments.count || 0}` +
+          pfLine
         );
       } else {
         const err = await loadRes.json().catch(() => ({ detail: "Failed to load context" }));
@@ -868,12 +880,22 @@ async function refreshContext() {
     });
     if (res.ok) {
       const data = await res.json();
+      const dropped = (data.dropped_docs_count || 0) + (data.dropped_scraped_count || 0);
+      const parts = [];
+      if (data.dropped_docs_count) parts.push(`${data.dropped_docs_count} kept doc(s)`);
+      if (data.dropped_scraped_count) parts.push(`${data.dropped_scraped_count} scraped article(s)`);
+      const droppedLine = dropped
+        ? `Condensed and dropped ${parts.join(", ")} from context — saved to memory.`
+        : `No loaded documents or scraped articles to drop.`;
       showSystemMessage(
-        `🔄 **Context refreshed**\n\n` +
-        `Saved summary of ${data.turns_cleared} chat turns and ${data.decisions_saved} decisions to memory.\n` +
-        `Context window: ${data.context.pct_free}% free (${data.context.remaining.toLocaleString()} tokens remaining).`
+        `🔄 **Context freed**\n\n` +
+        droppedLine + (data.memory_flushed ? " Conversation digest saved." : "") +
+        `\nContext window: ${data.context.pct_free}% free (${data.context.remaining.toLocaleString()} tokens remaining).`
       );
       updateContextUsage();
+      // Refresh the info panel so the Loaded Documents / Scraped Articles
+      // sections visibly empty after the drop.
+      if (!dom.infoPanel.classList.contains("hidden")) loadInfoPanel();
     } else {
       showSystemMessage("⚠️ Could not refresh context.");
     }
