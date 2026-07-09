@@ -358,6 +358,8 @@ Kept files persist across all your subsequent questions. Keep as many as you lik
 
 You can also **click any file in the ℹ Info panel's Project Data tree** to scan-and-keep it — no phrasing needed. Hover a file to see the "📌 keep" hint.
 
+When you're viewing a project file in your browser tab, a **📌 Scan** button appears in the tab bar — click it to scan-and-keep the file you're currently looking at.
+
 Remove a file with:
 - `remove this document` — the file open in your browser tab
 - `remove <filename>` — a specific kept file
@@ -378,7 +380,7 @@ Before your first message of a session the bar shows a rough projection; after t
 ### Notes on extraction
 
 - Text and figure legends are extracted from `.docx`/`.pdf`; **table-cell text is not** (tables in `.docx` are skipped by the parser).
-- Very large files are injected up to ~80k characters per turn; if a file is longer, the tail is truncated and the model will tell you to scan a specific section for content near the end.
+- Very large files are capped per document, but the cap **scales with your model's context window** (roughly half the window for a one-shot scan, a quarter for a kept doc). On a 1M-token model a typical manuscript or supplement loads in full; on a 128k-token model the cap is ~256k characters. If a file exceeds the cap, only the first portion is loaded and the model will tell you it was truncated and suggest asking about a specific section for the rest.
 - Kept text is frozen at keep-time. If you edit a kept file on Drive, click **Load Project** (same folder — it preserves your kept list) and re-keep that file to refresh it.
 
 ---

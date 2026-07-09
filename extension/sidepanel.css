@@ -665,6 +665,21 @@ body {
 #btn-use-tab:hover { background: var(--accent-hover); }
 #btn-use-tab.hidden { display: none; }
 
+#btn-scan-tab {
+  flex-shrink: 0;
+  padding: 3px 8px;
+  background: var(--file-accent, #b57edc);
+  color: var(--bg-primary);
+  border: none;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+#btn-scan-tab:hover { filter: brightness(1.1); }
+#btn-scan-tab.hidden { display: none; }
+
 /* --- Chat --- */
 #chat-container {
   flex: 1 1 0;

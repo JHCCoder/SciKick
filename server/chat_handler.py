@@ -309,10 +309,12 @@ def _estimate_context_usage(include_transient: bool = False) -> dict:
         for doc in _scraped_docs
     )
 
-    # Kept documents are injected every turn (capped at 80k chars each at inject
-    # time), so they count against the per-message budget — not just once.
+    # Kept documents are injected every turn (capped at the kept-doc budget,
+    # which scales with the model's context window), so they count against the
+    # per-message budget — not just once.
+    _kept_cap = _doc_char_budget(0.25)
     loaded_tokens = sum(
-        _estimate_tokens(d["text"][:80000]) + 100
+        _estimate_tokens(d["text"][:_kept_cap]) + 100
         for d in _loaded_docs
     )
 
@@ -1268,15 +1270,17 @@ def _build_user_message(
     # Cap the body so a very large manuscript can't blow the context budget;
     # the truncation note tells the model (and user) the tail was dropped.
     if full_manuscript_content and _current_doc is not None:
-        cap = 80000  # ~20k tokens — leaves room for comments/history/response
+        cap = _doc_char_budget(0.5)  # scales with the model's context window
         body = full_manuscript_content
         truncation_note = ""
         if len(body) > cap:
             body = body[:cap]
             truncation_note = (
-                "\n\n[... TRUNCATED: the manuscript is longer than the context "
-                "budget allows. The first ~80k characters are shown above; the "
-                "remainder was cut. Ask about a specific section to retrieve it.]"
+                f"\n\n[... TRUNCATED: this document is {len(full_manuscript_content):,} "
+                f"characters but only the first {cap:,} (~{cap // 4:,} tokens) fit the "
+                f"per-document budget for this model's context window. The remainder was "
+                f"cut. Tell the user the file was only partially loaded, and that they "
+                f"can ask about a specific section to retrieve content near the end.]"
             )
         parts.append(
             f"## Full Manuscript: {_current_doc.title}\n"
@@ -1290,6 +1294,18 @@ def _build_user_message(
 
     # Focused file — full content injected when user asks to scan/read a file
     if focused_file_content and current_file and current_file.get("name"):
+        fcap = _doc_char_budget(0.5)  # one-shot scan — same share as full-manuscript
+        fbody = focused_file_content
+        ftruncation = ""
+        if len(fbody) > fcap:
+            fbody = fbody[:fcap]
+            ftruncation = (
+                f"\n\n[... TRUNCATED: this file is {len(focused_file_content):,} characters "
+                f"but only the first {fcap:,} (~{fcap // 4:,} tokens) fit the per-document "
+                f"budget for this model's context window. The remainder was cut. Tell the "
+                f"user the file was only partially loaded, and that they can ask about a "
+                f"specific section to retrieve content near the end.]"
+            )
         parts.append(
             f"## Focused File: {current_file['name']}\n"
             f"The user has asked to focus on this file. Below is the FULL content. "
@@ -1297,9 +1313,9 @@ def _build_user_message(
             f"Note: Figures, images, and embedded graphics may appear as garbled binary or "
             f"base64 text — you cannot parse those. Skip over them and focus on the "
             f"readable text content. If the user asks about a figure you cannot read, "
-            f"tell them honestly and ask them to describe or paste the figure content.\n"
+            f"tell them honestly and ask them to describe or paste the figure content.{ftruncation}\n"
         )
-        parts.append(focused_file_content)
+        parts.append(fbody)
         parts.append("---\n")
     elif current_file and current_file.get("name") and not full_manuscript_content:
         parts.append(
@@ -1356,16 +1372,18 @@ def _build_user_message(
             "stay available across turns until the user asks to remove them. "
             "Treat their text as source material alongside the manuscript.\n"
         )
-        cap = 80000  # ~20k tokens — matches the full-manuscript cap
+        cap = _doc_char_budget(0.25)  # kept docs are resent every turn — smaller share
         for d in _loaded_docs:
             body = d["text"]
             truncation_note = ""
             if len(body) > cap:
                 body = body[:cap]
                 truncation_note = (
-                    f"\n\n[... TRUNCATED: only the first ~{cap} characters are kept "
-                    f"in persistent context. To see content near the end, ask me to "
-                    f"scan this file in full.]"
+                    f"\n\n[... TRUNCATED: this file is {len(d['text']):,} characters but "
+                    f"only the first {cap:,} are kept in persistent context (per-document "
+                    f"budget for this model). Tell the user this file was only partially "
+                    f"loaded, and that they can ask about a specific section to see "
+                    f"content near the end.]"
                 )
             parts.append(f"### Kept File: {d['name']}\n{body}{truncation_note}\n")
             parts.append("---\n")
@@ -1975,6 +1993,21 @@ def _get_context_window_size() -> tuple[int, str]:
         return 131072, "unknown"
 
 
+def _doc_char_budget(tokens_fraction: float) -> int:
+    """Per-document character budget scaled to the current model's context window.
+
+    ``tokens_fraction`` of the window (in tokens) converted to chars at ~4
+    chars/token. A one-shot scan can spend a larger share (one request) than a
+    kept document (resent every turn). Scales with the model: on a 1M-token
+    model a one-shot scan gets ~2M chars (so a typical supplement loads in
+    full), on a 128k-token model ~256k. Floor of 20k chars so tiny windows
+    don't regress to uselessness.
+    """
+    window_tokens, _ = _get_context_window_size()
+    char_budget = int(window_tokens * tokens_fraction) * 4
+    return max(20000, char_budget)
+
+
 @router.get("/context-usage")
 async def context_usage():
     """Estimate the context window usage of the next LLM request.
@@ -2014,7 +2047,7 @@ async def context_usage():
             _estimate_tokens(doc.full_text[:6000]) + 200 for doc in _scraped_docs
         )
         loaded_tokens = sum(
-            _estimate_tokens(d["text"][:80000]) + 100 for d in _loaded_docs
+            _estimate_tokens(d["text"][:_doc_char_budget(0.25)]) + 100 for d in _loaded_docs
         )
         breakdown = {
             "system_prompt": system_tokens,

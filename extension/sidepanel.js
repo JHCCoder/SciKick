@@ -94,6 +94,7 @@ const dom = {
   tabTitle: $("#current-tab-title"),
   tabDomain: $("#current-tab-domain"),
   btnUseTab: $("#btn-use-tab"),
+  btnScanTab: $("#btn-scan-tab"),
 };
 
 // ---------------------------------------------------------------------------
@@ -1372,6 +1373,9 @@ function updateTabBar(tab) {
   }
 
   dom.tabBar.classList.remove("hidden");
+  // Scan-this-file button is shown only when a project file is being viewed
+  // (set in the Drive-file branch below). Hidden by default each update.
+  dom.btnScanTab.classList.add("hidden");
   viewingFile = null;
 
   // Default: hide project bar — only show for Drive folders
@@ -1425,6 +1429,8 @@ function updateTabBar(tab) {
         dom.tabTitle.textContent = `Viewing: ${match.name}`;
         dom.tabBar.classList.add("viewing-project-file");
         viewingFile = { name: match.name, id: match.id };
+        // Offer a one-click scan & keep of the file being viewed.
+        dom.btnScanTab.classList.remove("hidden");
       } else {
         dom.tabIcon.textContent = "📄";
         dom.tabTitle.textContent = tab.title || "Untitled";
@@ -1477,6 +1483,13 @@ async function detectCurrentTab(retries = 3) {
 
 /** Wire up the tab action button (load folder or scrape page) */
 function initTabBar() {
+  // One-click scan & keep of the file currently viewed in the browser tab.
+  dom.btnScanTab.addEventListener("click", () => {
+    if (!viewingFile || !viewingFile.name) return;
+    dom.chatInput.value = `scan and keep ${viewingFile.name}`;
+    sendMessage();
+  });
+
   dom.btnUseTab.addEventListener("click", async () => {
     // "Load this folder" mode
     const folderId = dom.btnUseTab.dataset.folderId;
