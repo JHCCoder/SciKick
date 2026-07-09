@@ -1421,14 +1421,20 @@ def _build_user_message(
     # model doesn't claim the file was already loaded).
     if _last_kept_doc_name:
         kept_names = [d["name"] for d in _loaded_docs]
-        listing = "; ".join(kept_names) if kept_names else "(none)"
+        n = len(kept_names)
+        # Numbered listing so the model reproduces the COMPLETE list (every
+        # kept file, no omissions) rather than paraphrasing and dropping some.
+        listing = "\n".join(
+            f"{i + 1}. {name}" for i, name in enumerate(kept_names)
+        ) if kept_names else "(none)"
         parts.append("## Scan Confirmation\n")
         parts.append(
             f"You just successfully scanned and kept **{_last_kept_doc_name}** in "
-            f"context. Reply with a brief confirmation (one or two sentences) that "
-            f"names this file, then list ALL files currently kept in context: "
-            f"{listing}. Keep it short — do NOT dump or summarize file contents "
-            f"unless the user asks. Then wait for the user's next request.\n"
+            f"context. Reply with a one-line confirmation naming this file, then "
+            f"list EVERY file currently kept in context — there are {n} total and "
+            f"you must name all {n}, omitting none:\n{listing}\n"
+            f"Be brief by NOT dumping or summarizing file contents — but the file "
+            f"LIST above must be complete. Then wait for the user's next request.\n"
         )
         _last_kept_doc_name = None  # one-shot — only confirm on the keep turn
 
