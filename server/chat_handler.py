@@ -93,6 +93,12 @@ _scan_preference: str = ""  # "" | "yes" | "no"
 # designated manuscript). Cleared on /reset and /unload-project.
 _loaded_docs: list[dict] = []
 
+# Name of the file most recently added to _loaded_docs THIS request (set in
+# _add_loaded_doc, consumed+cleared in _build_user_message). Used to emit a
+# "scan succeeded + here are all kept files" confirmation instruction so the
+# model acknowledges the keep instead of claiming the file was already loaded.
+_last_kept_doc_name: Optional[str] = None
+
 # Per-turn scan injection (one-shot focused file + full-manuscript deep scan)
 # from the most recent turn. One-shot scans aren't persistent state, so
 # _loaded_docs/scraped/history don't capture them — without this the
@@ -813,11 +819,12 @@ def _add_loaded_doc(file_id: str, name: str, text: str) -> bool:
     invalidate it — but also means the user should re-keep after editing a
     file if they want the fresh content.
     """
-    global _loaded_docs
+    global _loaded_docs, _last_kept_doc_name
     for d in _loaded_docs:
         if d["file_id"] == file_id:
             return False  # already kept
     _loaded_docs.append({"file_id": file_id, "name": name, "text": text})
+    _last_kept_doc_name = name  # signal _build_user_message to confirm the keep
     logger.info(
         "Loaded-docs: added '%s' (%d chars); %d document(s) now kept",
         name, len(text), len(_loaded_docs),
@@ -921,7 +928,11 @@ async def _prepare_scan_context(
       appropriate content is fetched (or a clarification is requested).
     """
     global _awaiting_doc_choice, _awaiting_scan_confirmation, _scan_preference
-    global _loaded_docs
+    global _loaded_docs, _last_kept_doc_name
+    # Reset the per-request keep-confirmation flag: if a keep happens this turn
+    # _add_loaded_doc sets it, and _build_user_message consumes it. Clearing
+    # here prevents a stale flag from a prior failed request from leaking.
+    _last_kept_doc_name = None
 
     focused_file_content: Optional[str] = None
     focused_file_name: Optional[str] = None
@@ -1237,7 +1248,7 @@ def _build_user_message(
     clarification_text: Optional[str] = None,
 ) -> str:
     """Build the enriched user message with retrieved context."""
-    global _current_doc, _current_comments, _image_cache
+    global _current_doc, _current_comments, _image_cache, _last_kept_doc_name
 
     parts = []
 
@@ -1403,6 +1414,23 @@ def _build_user_message(
             "a file is 'already loaded' or 'already kept'; if they ask to scan or "
             "keep a file, treat it as a fresh request.\n"
         )
+
+    # Scan-and-keep confirmation: when a file was just kept this request, ask
+    # the model to acknowledge it and list every file currently kept — so the
+    # user gets a clear "scanned + here's what's in context" signal (and the
+    # model doesn't claim the file was already loaded).
+    if _last_kept_doc_name:
+        kept_names = [d["name"] for d in _loaded_docs]
+        listing = "; ".join(kept_names) if kept_names else "(none)"
+        parts.append("## Scan Confirmation\n")
+        parts.append(
+            f"You just successfully scanned and kept **{_last_kept_doc_name}** in "
+            f"context. Reply with a brief confirmation (one or two sentences) that "
+            f"names this file, then list ALL files currently kept in context: "
+            f"{listing}. Keep it short — do NOT dump or summarize file contents "
+            f"unless the user asks. Then wait for the user's next request.\n"
+        )
+        _last_kept_doc_name = None  # one-shot — only confirm on the keep turn
 
     # Web-scraped papers (accumulate separately from Drive context)
     global _scraped_docs, _scraped_sources
