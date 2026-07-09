@@ -56,6 +56,7 @@ const dom = {
   contextHint: $("#context-hint"),
   chatInput: $("#chat-input"),
   btnSend: $("#btn-send"),
+  btnStop: $("#btn-stop"),
   btnTheme: $("#btn-theme"),
   btnClear: $("#btn-clear"),
   btnPower: $("#btn-power"),
@@ -602,16 +603,82 @@ async function loadProject() {
 // ---------------------------------------------------------------------------
 
 dom.btnSend.addEventListener("click", sendMessage);
+dom.btnStop.addEventListener("click", () => {
+  // Interrupt the in-flight LLM stream; the abort surfaces in
+  // sendMessage's catch as an AbortError (silently ignored).
+  if (currentStream) currentStream.abort();
+});
 dom.chatInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     sendMessage();
+    return;
+  }
+
+  // Up/Down arrow: walk through submitted prompt history.
+  // (Ignore when the user is holding a modifier or has a text selection,
+  // so normal cursor movement still works.)
+  if (e.altKey || e.ctrlKey || e.metaKey) return;
+  if (dom.chatInput.selectionStart !== dom.chatInput.selectionEnd) return;
+
+  if (e.key === "ArrowUp" && chatHistory.length) {
+    e.preventDefault();
+    if (historyIndex === -1) {
+      // Entering history — stash the current draft to restore later.
+      liveDraft = dom.chatInput.value;
+      historyIndex = chatHistory.length - 1;
+    } else if (historyIndex > 0) {
+      historyIndex--;
+    } else {
+      return; // already at oldest entry
+    }
+    setChatInput(chatHistory[historyIndex]);
+  } else if (e.key === "ArrowDown") {
+    if (historyIndex === -1) return; // not navigating history
+    e.preventDefault();
+    if (historyIndex < chatHistory.length - 1) {
+      historyIndex++;
+      setChatInput(chatHistory[historyIndex]);
+    } else {
+      // Past the newest — restore the live draft.
+      historyIndex = -1;
+      setChatInput(liveDraft);
+    }
   }
 });
+
+// Submitted prompts (oldest → newest) and the navigation pointer.
+// historyIndex === -1 means we're at the live draft, not in history.
+let chatHistory = [];
+let historyIndex = -1;
+let liveDraft = "";
+
+// Replace the input contents (used when recalling history) and refit
+// the textarea height, placing the caret at the end.
+function setChatInput(text) {
+  dom.chatInput.value = text;
+  dom.chatInput.style.height = "auto";
+  dom.chatInput.style.height = Math.min(dom.chatInput.scrollHeight, 180) + "px";
+  const len = text.length;
+  dom.chatInput.focus();
+  dom.chatInput.setSelectionRange(len, len);
+}
+
+// Show/hide the stop button to reflect whether a response is streaming.
+function setGenerating(isGenerating) {
+  dom.btnStop.classList.toggle("hidden", !isGenerating);
+}
 
 async function sendMessage() {
   const text = dom.chatInput.value.trim();
   if (!text) return;
+
+  // Record in prompt history (skip consecutive duplicates).
+  if (chatHistory[chatHistory.length - 1] !== text) {
+    chatHistory.push(text);
+  }
+  historyIndex = -1;
+  liveDraft = "";
 
   // Clear input
   dom.chatInput.value = "";
@@ -625,9 +692,13 @@ async function sendMessage() {
     currentStream.abort();
   }
   currentStream = new AbortController();
+  setGenerating(true);
+
+  let assistantBubble = null;
+  let gotText = false;   // becomes true once any real content streams in
 
   try {
-    const assistantBubble = addMessage("assistant", "", true);
+    assistantBubble = addMessage("assistant", "", true);
     // Show typing dots inside the empty assistant bubble
     assistantBubble.innerHTML = '<div class="typing-dots"><span></span><span></span><span></span></div>';
     let fullResponse = "";
@@ -667,9 +738,11 @@ async function sendMessage() {
             const data = JSON.parse(line.slice(6));
             if (data.type === "text") {
               fullResponse += data.content;
+              gotText = true;
               renderAssistantMessage(assistantBubble, fullResponse);
             } else if (data.type === "error") {
               fullResponse += `\n\n⚠️ Error: ${data.content}`;
+              gotText = true;
               renderAssistantMessage(assistantBubble, fullResponse);
             }
           } catch (e) {
@@ -689,11 +762,18 @@ async function sendMessage() {
     if (!dom.infoPanel.classList.contains("hidden")) loadInfoPanel();
 
   } catch (e) {
-    if (e.name !== "AbortError") {
+    if (e.name === "AbortError") {
+      // User stopped generation. Drop the awaiting/thinking bubble if no
+      // content ever arrived; otherwise keep the partial response.
+      if (!gotText && assistantBubble && assistantBubble.parentElement) {
+        assistantBubble.parentElement.remove();
+      }
+    } else {
       addMessage("system", `❌ ${e.message}`);
     }
   } finally {
     currentStream = null;
+    setGenerating(false);
   }
 }
 

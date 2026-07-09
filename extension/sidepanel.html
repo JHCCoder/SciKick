@@ -199,11 +199,18 @@
                   placeholder="Ask me anything — brainstorm, write, analyze, or discuss your research..."
                   disabled></textarea>
       </div>
-      <button id="btn-send" disabled title="Send message (Enter)">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/>
-        </svg>
-      </button>
+      <div id="send-column">
+        <button id="btn-stop" class="hidden" title="Stop generating">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round">
+            <path d="M6 6L18 18"/><path d="M18 6L6 18"/>
+          </svg>
+        </button>
+        <button id="btn-send" disabled title="Send message (Enter)">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/>
+          </svg>
+        </button>
+      </div>
     </div>
   </footer>
 

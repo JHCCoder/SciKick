@@ -893,6 +893,33 @@ body {
 #chat-input:disabled { opacity: 0.5; }
 #chat-input::placeholder { color: var(--text-secondary); }
 
+#send-column {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: stretch;
+  flex-shrink: 0;
+}
+
+#btn-stop {
+  width: 38px;
+  height: 22px;
+  padding: 0;
+  background: var(--danger);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+  color: var(--bg-primary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  transition: filter 0.12s ease;
+}
+#btn-stop:hover {
+  filter: brightness(0.9);
+}
+
 #btn-send {
   width: 38px; height: 38px;
   background: var(--accent);
