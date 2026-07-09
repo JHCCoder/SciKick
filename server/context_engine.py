@@ -176,13 +176,16 @@ def retrieve_context(
     comments: list[ReviewerComment],
     chat_history: list[dict] = None,
     max_chunks: int = 3,
+    include_paper_chunks: bool = True,
 ) -> str:
     """
     Given a user query, return the most relevant context string to inject.
 
     This is a keyword-based retrieval for simplicity (no embedding needed).
     Returns a formatted string with:
-    - The most relevant paper sections
+    - The most relevant paper sections (unless include_paper_chunks=False —
+      used when the caller is already injecting the full manuscript text, so
+      the top-k chunks would be redundant noise)
     - The most relevant reviewer comments
     - Recent chat history summary
     """
@@ -200,18 +203,23 @@ def retrieve_context(
                 parts.append(f"**{role}:** {content}\n")
         return "\n".join(parts)
 
-    # Score paper chunks
-    chunks = chunk_paper_for_context(doc)
-    chunk_scores = []
-    for i, chunk in enumerate(chunks):
-        chunk_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", chunk.lower()))
-        if not chunk_words:
-            continue
-        overlap = len(query_words & chunk_words)
-        chunk_scores.append((i, overlap / len(query_words), chunk))
+    # When the caller injects the full manuscript separately, skip the
+    # top-k paper-chunk retrieval — it would only duplicate a slice of text
+    # the model already has in full, wasting context budget.
+    top_chunks = []
+    if include_paper_chunks:
+        # Score paper chunks
+        chunks = chunk_paper_for_context(doc)
+        chunk_scores = []
+        for i, chunk in enumerate(chunks):
+            chunk_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", chunk.lower()))
+            if not chunk_words:
+                continue
+            overlap = len(query_words & chunk_words)
+            chunk_scores.append((i, overlap / len(query_words), chunk))
 
-    chunk_scores.sort(key=lambda x: x[1], reverse=True)
-    top_chunks = chunk_scores[:max_chunks]
+        chunk_scores.sort(key=lambda x: x[1], reverse=True)
+        top_chunks = chunk_scores[:max_chunks]
 
     # Score reviewer comments
     comment_scores = []
@@ -258,6 +266,50 @@ def retrieve_context(
                  len(top_chunks), len(top_comments), len(context))
 
     return context
+
+
+# Common English stopwords — filtered out of the relevance score so coverage
+# questions ("does the document mention haplotig") aren't drowned by filler
+# words and the score reflects genuine content overlap.
+_STOPWORDS = frozenset("""
+a an and are as at be been being but by for from has have had he her him his
+i in is it its of on or our she that the their them they this to was were
+will with you your we us me my
+do does did doing can could should would may might must shall
+about above after again all also any because below into over then there
+where which while who whom whose what when why how
+not no nor so than too very up down out off
+""".split())
+
+
+def _content_words(text: str) -> set[str]:
+    return {w for w in re.findall(r"\b[a-zA-Z]{3,}\b", text.lower()) if w not in _STOPWORDS}
+
+
+def best_chunk_score(query: str, doc: PaperDocument) -> float:
+    """Return the relevance confidence of targeted retrieval for a query.
+
+    The highest ``overlap / len(query_content_words)`` over all paper chunks —
+    i.e. the same idea ``retrieve_context`` uses to rank chunks, but with
+    stopwords filtered so the absolute value is meaningful as a threshold.
+    A router uses this to decide whether the top-k chunks are likely to
+    contain the answer (high score) or whether the question needs a
+    full-document scan (low score). Returns 0.0 for queries with no
+    extractable content words.
+    """
+    query_words = _content_words(query)
+    if not query_words:
+        return 0.0
+
+    best = 0.0
+    for chunk in chunk_paper_for_context(doc):
+        chunk_words = _content_words(chunk)
+        if not chunk_words:
+            continue
+        overlap = len(query_words & chunk_words)
+        if overlap:
+            best = max(best, overlap / len(query_words))
+    return best
 
 
 # ---------------------------------------------------------------------------

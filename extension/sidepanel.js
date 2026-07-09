@@ -998,6 +998,20 @@ async function loadInfoPanel() {
     html += '</div>';
   }
 
+  // --- Loaded Documents (files the user asked to keep in context) ---
+  if (ctxRes && ctxRes.loaded_docs && ctxRes.loaded_docs.length > 0) {
+    html += '<hr class="info-divider">';
+    html += '<div class="info-section">';
+    html += '<div class="info-section-title">📌 Loaded Documents</div>';
+    html += `<div class="info-row"><span class="info-label">Count</span><span class="info-value">${ctxRes.loaded_docs.length}</span></div>`;
+    ctxRes.loaded_docs.forEach((d, i) => {
+      html += `<div class="info-row"><span class="info-label">#${i + 1}</span><span class="info-value">${escHtml(d.name || "Untitled")}</span></div>`;
+      html += `<div class="info-row"><span class="info-label">Size</span><span class="info-value">${formatSize(d.chars || 0)}</span></div>`;
+    });
+    html += `<div class="info-row"><span class="info-label">Tip</span><span class="info-value">Say “remove this document” or “clear all loaded documents” to drop one.</span></div>`;
+    html += '</div>';
+  }
+
   // --- Project Data (file tree) ---
   if (projectFiles && projectFiles.length > 0) {
     const tree = buildFileTree(projectFiles);
@@ -1594,21 +1608,43 @@ async function init() {
 
   // Open a port to the background worker.
   // The worker pushes tab changes via this port (proactive updates).
-  bgPort = chrome.runtime.connect({ name: "sidepanel" });
-  bgPort.onMessage.addListener((msg) => {
-    if (msg.type === "activeTabChanged" && msg.tab) {
-      updateTabBar(msg.tab);
-    }
-  });
-  bgPort.onDisconnect.addListener(() => {
-    console.warn("[TabBar] Background port disconnected");
-    bgPort = null;
-  });
+  //
+  // Chrome recycles the MV3 service worker after ~30s idle, which closes the
+  // port. The keep-alive ping below holds it open while the panel is active,
+  // but a recycle (or the panel being backgrounded) can still disconnect it.
+  // When that happens we reconnect after a short backoff so proactive tab
+  // updates resume — otherwise they'd stop forever until the panel reloaded.
+  let bgReconnectTimer = null;
+  function connectBgPort() {
+    bgPort = chrome.runtime.connect({ name: "sidepanel" });
+    bgPort.onMessage.addListener((msg) => {
+      if (msg.type === "activeTabChanged" && msg.tab) {
+        updateTabBar(msg.tab);
+      }
+    });
+    bgPort.onDisconnect.addListener(() => {
+      console.warn("[TabBar] Background port disconnected — will reconnect");
+      bgPort = null;
+      // Service worker was recycled (or panel slept). Reconnect shortly; the
+      // worker is recreated on-demand by chrome.runtime.connect.
+      if (bgReconnectTimer) clearTimeout(bgReconnectTimer);
+      bgReconnectTimer = setTimeout(connectBgPort, 2000);
+    });
+  }
+  connectBgPort();
 
-  // Ping every 20s to keep the service worker from going inactive
+  // Ping every 20s to keep the service worker from going inactive. Also
+  // serves as a reconnection safety net: if the port is null (a disconnect
+  // happened and the scheduled reconnect hasn't fired/landed yet), reconnect
+  // here so updates resume within one ping cycle.
   setInterval(() => {
-    if (bgPort) {
-      try { bgPort.postMessage({ type: "ping" }); } catch (e) { /* port closed */ }
+    if (!bgPort) {
+      try { connectBgPort(); } catch (e) { /* will retry next tick */ }
+      return;
+    }
+    try { bgPort.postMessage({ type: "ping" }); } catch (e) {
+      // Port died between ticks — force a reconnect.
+      bgPort = null;
     }
   }, 20000);
 

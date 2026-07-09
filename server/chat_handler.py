@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import AsyncGenerator, Optional
 
@@ -21,6 +22,7 @@ from config import get_llm_config, _is_local_provider
 from context_engine import (
     PaperDocument,
     ReviewerComment,
+    best_chunk_score,
     retrieve_context,
 )
 from memory_manager import (
@@ -49,6 +51,10 @@ _current_doc: Optional[PaperDocument] = None
 _current_comments: list[ReviewerComment] = []
 _image_cache: dict[str, bytes] = {}  # filename -> raw bytes
 _current_doc_source: str = ""  # "drive:<folder_id>"
+# Drive file id of the loaded manuscript, so a scan/focus request for that
+# same file can short-circuit to the already-parsed _current_doc instead of
+# re-downloading it from Drive (slow, and can time out on large files).
+_current_doc_file_id: str = ""
 
 # Web-scraped papers — accumulate (multiple allowed), separate from Drive context
 _scraped_docs: list[PaperDocument] = []
@@ -62,6 +68,81 @@ _focused_file_cache: dict[str, str] = {}
 # in different subfolders (e.g. subA/notes.txt, subB/notes.txt) don't
 # overwrite each other; the consumer disambiguates.
 _project_file_index: dict[str, list[dict]] = {}
+
+# Set True after the server injects a "which document do you want me to scan?"
+# clarification. The next user message is then treated as the document choice
+# (even without a scan trigger word) and resolved by _resolve_doc_choice.
+# Session-scoped — cleared on choice resolution, /reset, /unload-project.
+_awaiting_doc_choice: bool = False
+
+# Proactive scan offer: when a question seems to need the full document but
+# the user didn't explicitly say "scan", we offer once ("want me to scan this
+# document really quickly?"). _awaiting_scan_confirmation is set while we wait
+# for the yes/no reply; _scan_preference remembers the answer so we don't ask
+# again that session ("yes" → auto-scan future implicit-need questions,
+# "no" → just use targeted chunks). Session-scoped; cleared on /reset,
+# /unload-project.
+_awaiting_scan_confirmation: bool = False
+_scan_preference: str = ""  # "" | "yes" | "no"
+
+# Loaded documents — project files the user explicitly asked to "keep" in
+# context across turns (e.g. "scan and keep the supplement"). Each entry is
+# {"file_id", "name", "text"}. Persists for the session (like _scraped_docs),
+# injected every turn, removable on request. Distinct from the one-shot
+# "Focused File" block (single turn) and from _current_doc (the single
+# designated manuscript). Cleared on /reset and /unload-project.
+_loaded_docs: list[dict] = []
+
+# Per-turn scan injection (one-shot focused file + full-manuscript deep scan)
+# from the most recent turn. One-shot scans aren't persistent state, so
+# _loaded_docs/scraped/history don't capture them — without this the
+# context-usage meter wouldn't move when the user scans a file. Counted by
+# the meter, reset to 0 on turns with no scan, cleared on /reset +
+# /unload-project.
+_last_turn_scan_chars: int = 0
+
+# Actual token count of the most recent LLM request (system_prompt +
+# user_message), recorded after each /send. The panel's context meter shows
+# this so it reflects the REAL prompt size for the next/last request —
+# one-shot scans raise it (their tokens are part of that request) and it drops
+# again when a smaller request is sent. This mirrors Claude Code's meter: if
+# tokens are sent to the model, they count. 0 until the first request, at
+# which point the meter falls back to a standing projection.
+_last_request_tokens: int = 0
+_last_request_system_tokens: int = 0
+_last_request_user_tokens: int = 0
+
+# Phrases that signal "add this file to the persistent loaded set" (not just a
+# one-shot scan). Phrase-based, not bare words, so "keep it concise" / "add
+# this to the results" don't false-trigger.
+_KEEP_MARKERS = (
+    "keep this loaded", "keep that loaded", "keep it loaded",
+    "keep this document", "keep this file", "keep that document", "keep that file",
+    "keep the document", "keep the file",
+    "scan and keep", "read and keep", "load and keep",
+    "also load", "load too",
+    "add to context", "add to the context",
+    "remember this file", "remember this document",
+    "keep in context", "keep on hand",
+    "persist this",
+)
+# Phrases that signal "drop a file from the persistent loaded set". Removal
+# needs a verb (remove/unload/drop/forget/stop loading) AND a document
+# reference — either a named project file or "this/that/the document/file" —
+# so a normal editing request like "remove the comma after haplotig" can't
+# silently drop the open tab from the loaded set.
+_REMOVE_VERBS = (
+    "remove", "unload", "drop", "forget",
+    "stop loading", "stop keeping", "stop including",
+)
+_REMOVE_DOC_REFS = (
+    "this document", "this file", "that document", "that file",
+    "the document", "the file", "these documents", "those files",
+)
+_REMOVE_ALL_MARKERS = (
+    "clear all loaded", "remove all loaded", "unload all loaded",
+    "clear loaded documents", "clear loaded files",
+)
 
 
 def set_project_file_index(files: list[dict]) -> None:
@@ -90,20 +171,24 @@ def set_project_context(
     comments: list[ReviewerComment],
     images: dict[str, bytes] = None,
     source: str = "",
+    doc_file_id: str = "",
 ) -> None:
     """Set the current project context for chat sessions."""
     global _current_doc, _current_comments, _image_cache, _current_doc_source
+    global _current_doc_file_id
     _current_doc = doc
     _current_comments = comments
     _current_doc_source = source
+    _current_doc_file_id = doc_file_id
     if images:
         _image_cache = images
     logger.info(
-        "Project context set: %d sections, %d comments, %d images (source=%s)",
+        "Project context set: %d sections, %d comments, %d images (source=%s, doc_file_id=%s)",
         len(doc.sections),
         len(comments),
         len(_image_cache),
         source,
+        doc_file_id or "(none)",
     )
 
 
@@ -195,8 +280,16 @@ class ChatResponse(BaseModel):
 # Core chat logic
 # ---------------------------------------------------------------------------
 
-def _estimate_context_usage() -> dict:
-    """Estimate current context window usage (reused by system prompt and endpoint)."""
+def _estimate_context_usage(include_transient: bool = False) -> dict:
+    """Estimate current context window usage.
+
+    By default reflects STANDING context — persistent items only (kept docs,
+    chat history, scraped papers, system/retrieval baseline). This is what the
+    panel's % free bar shows, so a one-shot scan (transient — gone next turn)
+    doesn't make it spike and drop. Pass ``include_transient=True`` to also
+    count the most recent turn's scan injection; the per-turn system-prompt
+    guidance uses that so the model knows when a scan made the turn tight.
+    """
     window_size, model = _get_context_window_size()
 
     system_tokens = _estimate_tokens(SYSTEM_PROMPT)
@@ -216,11 +309,23 @@ def _estimate_context_usage() -> dict:
         for doc in _scraped_docs
     )
 
+    # Kept documents are injected every turn (capped at 80k chars each at inject
+    # time), so they count against the per-message budget — not just once.
+    loaded_tokens = sum(
+        _estimate_tokens(d["text"][:80000]) + 100
+        for d in _loaded_docs
+    )
+
+    # One-shot / deep scans from the most recent turn (transient, not
+    # persistent) — only counted for per-turn guidance, not the standing meter.
+    last_turn_scan_tokens = (_last_turn_scan_chars // 4) if include_transient else 0
+
     message_reserve = 8000
 
     total_used = (
         system_tokens + resume_tokens + retrieval_tokens
-        + history_tokens + scraped_tokens + message_reserve
+        + history_tokens + scraped_tokens + loaded_tokens
+        + last_turn_scan_tokens + message_reserve
     )
 
     pct_used = round(min((total_used / window_size) * 100, 100), 1)
@@ -247,9 +352,11 @@ def _build_system_prompt() -> str:
     except Exception:
         pass
 
-    # Context window awareness — let the model know how much room it has
+    # Context window awareness — let the model know how much room it has.
+    # include_transient=True so the model sees this turn's scan injection
+    # (the panel bar deliberately does NOT, to stay stable across turns).
     try:
-        ctx = _estimate_context_usage()
+        ctx = _estimate_context_usage(include_transient=True)
         guidance = ""
         if ctx["pct_used"] > 90:
             guidance = " The window is almost full — be extremely concise (a few sentences at most)."
@@ -354,26 +461,16 @@ async def _download_and_parse_file(file_id: str, file_name: str) -> str | None:
         return None
 
 
-def _should_focus_file(message: str, current_file: dict | None) -> tuple[str | None, str | None]:
-    """Check whether the user is asking to focus on a file. Returns (file_id, file_name) or (None, None).
+def _match_named_file(message: str) -> tuple[str, str] | None:
+    """Return (file_id, file_name) if the message mentions a project file by name.
 
-    Two ways to trigger:
-    1. current_file is set (file open in browser tab) + trigger phrase in message
-    2. User mentions a project file by name in the message + trigger phrase
+    Gather every matching key and pick the LONGEST — a full path (e.g.
+    "subb/notes.txt") is more specific than a bare basename ("notes.txt") and
+    should win, otherwise a duplicate basename in another subfolder could
+    shadow the intended file. No trigger-phrase gate: this is pure name
+    matching, reused by both the explicit-scan and choice-resolution paths.
     """
     msg_lower = message.lower()
-    has_trigger = any(trigger in msg_lower for trigger in _FOCUS_TRIGGERS)
-    if not has_trigger:
-        return None, None
-
-    # Case 1: current_file is set (file open in browser tab)
-    if current_file and current_file.get("id"):
-        return current_file["id"], current_file.get("name", "unknown")
-
-    # Case 2: user mentioned a project file by name. Gather every matching key
-    # and pick the LONGEST one — a full path (e.g. "subb/notes.txt") is more
-    # specific than a bare basename ("notes.txt") and should win, otherwise a
-    # duplicate basename in another subfolder could shadow the intended file.
     global _project_file_index
     best_key = None
     best_entries = None
@@ -384,21 +481,644 @@ def _should_focus_file(message: str, current_file: dict | None) -> tuple[str | N
                 best_key = fname_lower
                 best_entries = entries
 
-    if best_entries is not None:
-        entry = best_entries[0]
-        if len(best_entries) > 1:
-            # Duplicate basenames across subfolders — pick the first and warn;
-            # the user can disambiguate by naming the full path.
-            logger.warning(
-                "Focus file: '%s' matches %d files; using the first (id=%s). "
-                "Specify the full path to pick a different one.",
-                best_key, len(best_entries), entry["id"],
-            )
-        else:
-            logger.info("Focus file: matched '%s' in message, file_id=%s", best_key, entry["id"])
-        return entry["id"], entry["name"]
+    if best_entries is None:
+        return None
 
-    return None, None
+    entry = best_entries[0]
+    if len(best_entries) > 1:
+        # Duplicate basenames across subfolders — pick the first and warn;
+        # the user can disambiguate by naming the full path.
+        logger.warning(
+            "Focus file: '%s' matches %d files; using the first (id=%s). "
+            "Specify the full path to pick a different one.",
+            best_key, len(best_entries), entry["id"],
+        )
+    else:
+        logger.info("Focus file: matched '%s' in message, file_id=%s", best_key, entry["id"])
+    return entry["id"], entry["name"]
+
+
+# Phrases that point at the *currently-viewed* browser-tab file vs. the *loaded
+# manuscript*. Substring-matched against the lowercased message. Order matters
+# where one could contain another, so check current_refs first in callers.
+_CURRENT_FILE_REFS = (
+    "this file", "this document", "current document", "current file",
+    "the current one", "this one", "the one i'm on", "the one im on",
+    "the one i'm viewing", "the one im viewing", "the one i'm looking at",
+    "the page i'm on", "the open tab", "the tab",
+)
+_MANUSCRIPT_REFS = (
+    "manuscript", "the paper", "the supplement", "supplemental material",
+    "loaded document", "loaded manuscript", "the main text", "main manuscript",
+)
+# Whole-document / coverage intent — "the answer is probably somewhere in the
+# doc and targeted chunks may not have caught it."
+_COVERAGE_REFS = (
+    "does the document", "does the manuscript", "does the paper",
+    "is there", "are there any", "any mention", "any reference",
+    "find all", "list all", "scan and check", "check the document",
+    "check the manuscript", "check the whole", "throughout the",
+    "in the whole", "entire document", "entire manuscript", "whole document",
+    "whole manuscript", "anywhere in",
+)
+
+
+def _has_any(text_lower: str, phrases: tuple[str, ...]) -> bool:
+    return any(p in text_lower for p in phrases)
+
+
+def _classify_scan_intent(
+    message: str,
+    current_file: dict | None,
+    doc: Optional[PaperDocument],
+    awaiting_choice: bool,
+) -> str:
+    """Decide how to handle a possible document-scan request.
+
+    Returns one of:
+    - "deep_manuscript"  : inject the full loaded manuscript
+    - "focus_current"    : download + inject the file open in the browser tab
+    - "focus_named"      : download + inject a project file named in the message
+    - "keep_named"       : parse + ADD a named file to the persistent loaded set
+    - "keep_current"     : parse + ADD the browser-tab file to the loaded set
+    - "keep_manuscript"  : keep requested for the manuscript (already in context)
+    - "remove_named"     : drop a named file from the loaded set
+    - "remove_current"   : drop the browser-tab file from the loaded set
+    - "remove_all"       : clear the entire loaded set
+    - "ask"              : ambiguous — ask the user which document to scan
+    - "offer_scan"       : implicit need, single manuscript — offer a quick scan
+    - "targeted"         : no full scan; use normal top-k chunk retrieval
+
+    Only asks when there is a genuine choice (a Drive file open in the tab AND
+    a manuscript/other files available) and the user didn't already specify a
+    target. With a single candidate, it scans directly; with no scan intent,
+    it falls through to targeted retrieval.
+    """
+    msg_lower = message.lower()
+
+    has_current_file = bool(current_file and current_file.get("id"))
+    has_manuscript = doc is not None
+    # If the open tab IS the loaded manuscript, there's really only one
+    # candidate — don't ask "which document?" and don't re-download it.
+    tab_is_manuscript = (
+        has_current_file
+        and bool(_current_doc_file_id)
+        and current_file["id"] == _current_doc_file_id
+    )
+    # Genuine multi-candidate ambiguity: a *different* file is open in the
+    # tab AND a manuscript is loaded.
+    multi_candidate = has_manuscript and has_current_file and not tab_is_manuscript
+    named = _match_named_file(message)
+
+    # --- Keep / remove loaded-document requests -------------------------
+    # "scan and keep this file" / "also load the supplement" → persist the
+    # file across turns (not just a one-shot scan). Checked before the plain
+    # scan triggers so a keep request never degrades to a single-turn scan.
+    wants_remove = (
+        _has_any(msg_lower, _REMOVE_ALL_MARKERS)
+        or (_has_any(msg_lower, _REMOVE_VERBS)
+            and (named or _has_any(msg_lower, _REMOVE_DOC_REFS)))
+    )
+    # "keep the manuscript loaded" / "keep the supplement in context" — the
+    # exact-phrase markers above won't match every natural phrasing, so also
+    # accept "keep" co-occurring with "loaded" or "in context". The combo
+    # stays false-positive-safe: "keep this section concise" has no
+    # "loaded"/"in context", so it doesn't trigger.
+    wants_keep = (
+        _has_any(msg_lower, _KEEP_MARKERS)
+        or ("keep" in msg_lower and ("loaded" in msg_lower or "in context" in msg_lower))
+        or ("keep" in msg_lower and named is not None)  # "keep <filename>"
+    )
+    if wants_remove:
+        if _has_any(msg_lower, _REMOVE_ALL_MARKERS):
+            return "remove_all"
+        if named:
+            return "remove_named"
+        if has_current_file and _has_any(msg_lower, _REMOVE_DOC_REFS):
+            return "remove_current"
+        # removal requested but no target resolved → fall through; the model
+        # will ask which file to remove.
+    if wants_keep:
+        if named:
+            return "keep_named"
+        # "keep the manuscript" — recognise the main-text intent before
+        # falling back to the open tab. Uses a NARROWER ref set than
+        # _MANUSCRIPT_REFS (which also lists "the supplement") so "keep the
+        # supplement" with the supplement tab open routes to keep_current,
+        # not to a no-op keep_manuscript.
+        if has_manuscript and _has_any(msg_lower, ("manuscript", "the paper", "main text", "main manuscript")):
+            return "keep_manuscript"
+        if has_current_file and not tab_is_manuscript:
+            return "keep_current"
+        # keep requested but no target resolved → fall through to ask/scan.
+
+    # --- Explicit scan/read request -------------------------------------
+    has_trigger = any(trigger in msg_lower for trigger in _FOCUS_TRIGGERS)
+    if has_trigger:
+        wants_current = _has_any(msg_lower, _CURRENT_FILE_REFS)
+        wants_manuscript = _has_any(msg_lower, _MANUSCRIPT_REFS)
+        # An explicitly-named file beats a generic "this"/"the document".
+        if named:
+            return "focus_named"
+        if wants_current and has_current_file and not tab_is_manuscript:
+            return "focus_current"
+        if wants_manuscript and has_manuscript:
+            return "deep_manuscript"
+        # Explicit scan but no target resolved.
+        if multi_candidate:
+            return "ask"  # two plausible targets — let the user pick
+        if has_manuscript:
+            return "deep_manuscript"  # only candidate available
+        if has_current_file:
+            return "focus_current"
+        return "targeted"  # nothing to scan
+
+    # --- Implicit "needs more context" signal ---------------------------
+    # A coverage/existence question ("does the document mention X", "is there
+    # a figure about Y", "find all …") explicitly signals the user expects a
+    # document-grounded answer. When the term isn't in any chunk, targeted
+    # retrieval would come up empty — so we proactively OFFER to scan (once
+    # per session) rather than answer from thin excerpts.
+    #
+    # Pure low-confidence (no keyword overlap) is NOT used as a trigger: it
+    # can't tell "needs the full doc" apart from "isn't about the doc at all"
+    # (e.g. "what should I write in the response?"), and using it would nag
+    # the user with scan offers / "which document?" on every off-keyword
+    # question.
+    query_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", msg_lower))
+    substantive = len(query_words) >= 3
+    coverage = _has_any(msg_lower, _COVERAGE_REFS)
+    needs_more = substantive and coverage
+
+    if needs_more:
+        score = best_chunk_score(message, doc) if has_manuscript else 0.0
+        if multi_candidate:
+            return "ask"  # could be the tab or the manuscript — ask which
+        if has_manuscript:
+            # Single candidate. If the coverage term is found in a chunk,
+            # targeted retrieval is enough — don't offer. Otherwise the
+            # answer likely needs the full doc → offer to scan.
+            if score >= 0.15:
+                return "targeted"
+            return "offer_scan"
+        if has_current_file:
+            return "focus_current"
+
+    return "targeted"
+
+
+def _resolve_doc_choice(
+    message: str, current_file: dict | None
+) -> tuple[str, Optional[str], Optional[str]]:
+    """Resolve the user's reply to a "which document?" clarification.
+
+    Returns (kind, file_id, file_name) where kind is one of:
+    - "focus_current"   : the browser-tab file (file_id/name set)
+    - "deep_manuscript" : the loaded manuscript (file_id/name None)
+    - "focus_named"     : a project file named in the reply (file_id/name set)
+    - "ask_name"        : user said "another" but didn't name it — re-ask
+    - "unclear"         : couldn't parse — re-ask
+    """
+    msg_lower = message.lower()
+    has_current_file = bool(current_file and current_file.get("id"))
+
+    named = _match_named_file(message)
+    if named:
+        return "focus_named", named[0], named[1]
+
+    if _has_any(msg_lower, _CURRENT_FILE_REFS) and has_current_file:
+        return "focus_current", current_file["id"], current_file.get("name", "unknown")
+
+    if _has_any(msg_lower, _MANUSCRIPT_REFS):
+        return "deep_manuscript", None, None
+
+    if _has_any(msg_lower, ("another", "other", "different", "else", "not that", "not this")):
+        return "ask_name", None, None
+
+    return "unclear", None, None
+
+
+def _manuscript_text_if_target(file_id: Optional[str]) -> Optional[str]:
+    """If ``file_id`` is the loaded manuscript, return its in-memory full text.
+
+    Lets a focus/scan request for the manuscript reuse the already-parsed
+    ``_current_doc`` instead of re-downloading it from Drive (slow, and the
+    most likely file to time out). Returns None when it's a different file
+    or no manuscript is loaded.
+    """
+    if (
+        file_id
+        and _current_doc is not None
+        and _current_doc_file_id
+        and file_id == _current_doc_file_id
+    ):
+        return _current_doc.full_text
+    return None
+
+
+def _add_loaded_doc(file_id: str, name: str, text: str) -> bool:
+    """Add a file's text to the persistent loaded-documents set.
+
+    Dedupes by file_id (re-keeping an already-kept file is a no-op). Returns
+    True if newly added, False if it was already present. The text is stored
+    verbatim (capped at inject time) so a later Drive edit doesn't silently
+    invalidate it — but also means the user should re-keep after editing a
+    file if they want the fresh content.
+    """
+    global _loaded_docs
+    for d in _loaded_docs:
+        if d["file_id"] == file_id:
+            return False  # already kept
+    _loaded_docs.append({"file_id": file_id, "name": name, "text": text})
+    logger.info(
+        "Loaded-docs: added '%s' (%d chars); %d document(s) now kept",
+        name, len(text), len(_loaded_docs),
+    )
+    return True
+
+
+def _remove_loaded_doc_by_id(file_id: str) -> bool:
+    """Drop a file from the loaded-documents set by Drive id. Returns True if removed."""
+    global _loaded_docs
+    before = len(_loaded_docs)
+    _loaded_docs = [d for d in _loaded_docs if d["file_id"] != file_id]
+    removed = len(_loaded_docs) < before
+    if removed:
+        logger.info("Loaded-docs: removed file_id=%s; %d remaining", file_id, len(_loaded_docs))
+    return removed
+
+
+def _is_kept_doc(file_id: Optional[str]) -> bool:
+    """True if a file is already in the persistent loaded-documents set."""
+    return bool(file_id) and any(d["file_id"] == file_id for d in _loaded_docs)
+
+
+def _record_last_turn_scan(
+    focused_content: Optional[str],
+    full_manuscript_content: Optional[str],
+    focus_id: Optional[str],
+) -> None:
+    """Record the current turn's scan injection so the meter reflects it.
+
+    One-shot scans (focus_current/focus_named) and deep-manuscript scans inject
+    content for a single turn that the persistent-state totals
+    (_loaded_docs, scraped, history) don't capture. Without this the
+    context-usage bar wouldn't move when the user scans a file. A focused file
+    that's already kept in _loaded_docs is excluded here so it isn't
+    double-counted (it's already in loaded_tokens).
+    """
+    global _last_turn_scan_chars
+    chars = len(full_manuscript_content or "")
+    if focused_content:
+        already_kept = bool(focus_id) and any(
+            d["file_id"] == focus_id for d in _loaded_docs
+        )
+        if not already_kept:
+            chars += len(focused_content)
+    _last_turn_scan_chars = chars
+
+
+def _record_last_request(system_prompt: str, user_message: str) -> None:
+    """Record the actual token count of the request just built.
+
+    The panel meter shows this: it's the real size of the prompt sent to the
+    model (system_prompt + user_message), so everything that counts — history,
+    retrieved chunks, kept docs, one-shot scans, injected instructions — is
+    captured by construction, with no double-counting (the message builder
+    dedupes kept-vs-scanned files). One-shot scans raise it for that request
+    and it drops when the next request is smaller, matching Claude Code.
+    """
+    global _last_request_tokens, _last_request_system_tokens, _last_request_user_tokens
+    _last_request_system_tokens = _estimate_tokens(system_prompt)
+    _last_request_user_tokens = _estimate_tokens(user_message)
+    _last_request_tokens = _last_request_system_tokens + _last_request_user_tokens
+    logger.info(
+        "Context meter: last request ~%d tokens (system=%d, user=%d)",
+        _last_request_tokens, _last_request_system_tokens, _last_request_user_tokens,
+    )
+
+
+async def _prepare_scan_context(
+    message: str, current_file: dict | None
+) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[str]]:
+    """Decide what document content to inject for this turn.
+
+    Returns ``(focused_file_content, focused_file_name, focus_id,
+    full_manuscript_content, clarification_text)``. ``clarification_text`` is
+    set when the LLM should ask the user something instead of answering
+    (either "which document?" or "want me to scan?") — in that case retrieval
+    is skipped.
+
+    - If we offered a quick scan last turn (``_awaiting_scan_confirmation``),
+      the yes/no reply is resolved here and remembered for the session.
+    - If we asked "which document?" last turn (``_awaiting_doc_choice``),
+      the reply is resolved via ``_resolve_doc_choice``.
+    - Otherwise the intent is classified by ``_classify_scan_intent`` and the
+      appropriate content is fetched (or a clarification is requested).
+    """
+    global _awaiting_doc_choice, _awaiting_scan_confirmation, _scan_preference
+    global _loaded_docs
+
+    focused_file_content: Optional[str] = None
+    focused_file_name: Optional[str] = None
+    focus_id: Optional[str] = None
+    full_manuscript_content: Optional[str] = None
+    clarification_text: Optional[str] = None
+
+    # --- Resolving a pending "want me to scan?" offer -------------------
+    if _awaiting_scan_confirmation:
+        _awaiting_scan_confirmation = False
+        if _is_affirmative(message):
+            _scan_preference = "yes"
+            if _current_doc is not None:
+                full_manuscript_content = _current_doc.full_text
+                logger.info(
+                    "Scan offer accepted — injecting full manuscript (%d chars); "
+                    "future implicit-need questions will auto-scan", len(full_manuscript_content))
+            return (focused_file_content, focused_file_name, focus_id,
+                    full_manuscript_content, clarification_text)
+        if _is_negative(message):
+            _scan_preference = "no"
+            logger.info("Scan offer declined — using targeted chunks; "
+                        "future implicit-need questions will use chunks")
+            return (focused_file_content, focused_file_name, focus_id,
+                    full_manuscript_content, clarification_text)
+        # Neither yes nor no — treat as a fresh question (don't set a
+        # preference) and fall through to normal classification.
+
+    # --- Resolving a pending "which document?" question -----------------
+    if _awaiting_doc_choice:
+        kind, fid, fname = _resolve_doc_choice(message, current_file)
+        if kind in ("focus_current", "focus_named") and fid:
+            _awaiting_doc_choice = False
+            # If they picked the manuscript, use the in-memory parse (capped
+            # Full Manuscript path) instead of re-downloading from Drive.
+            ms_text = _manuscript_text_if_target(fid)
+            if ms_text is not None:
+                full_manuscript_content = ms_text
+            else:
+                focused_file_name = fname
+                focus_id = fid
+                focused_file_content = await _download_and_parse_file(fid, fname)
+            return (focused_file_content, focused_file_name, focus_id,
+                    full_manuscript_content, clarification_text)
+        if kind == "deep_manuscript" and _current_doc is not None:
+            _awaiting_doc_choice = False
+            full_manuscript_content = _current_doc.full_text
+            return (focused_file_content, focused_file_name, focus_id,
+                    full_manuscript_content, clarification_text)
+        if kind == "ask_name":
+            # User said "another" but didn't name it — keep awaiting, re-ask.
+            clarification_text = _build_clarification_block(current_file)
+            return (focused_file_content, focused_file_name, focus_id,
+                    full_manuscript_content, clarification_text)
+        # "unclear" — the user likely ignored the question and asked
+        # something else. Stop awaiting and treat this as a fresh message so
+        # we don't trap them in a "which document?" loop.
+        _awaiting_doc_choice = False
+        # fall through to normal classification below
+
+    # --- Normal turn — classify intent ----------------------------------
+    intent = _classify_scan_intent(message, current_file, _current_doc, _awaiting_doc_choice)
+
+    # --- Keep / remove persistent loaded documents ----------------------
+    # These mutate the _loaded_docs set; the actual text is injected every
+    # turn by the ## Loaded Documents block in _build_user_message, so on a
+    # successful keep we don't also set focused_file_content — that would
+    # double-inject. Retrieval still runs (targeted) so the model has its
+    # usual chunks alongside the newly-kept file.
+    if intent == "keep_named":
+        named = _match_named_file(message)
+        if named:
+            fid, fname = named
+            if _manuscript_text_if_target(fid) is not None:
+                logger.info("Loaded-docs: '%s' is the loaded manuscript; already in context", fname)
+            else:
+                text = await _download_and_parse_file(fid, fname)
+                if text:
+                    _add_loaded_doc(fid, fname, text)
+                else:
+                    clarification_text = (
+                        "## File Scan Failed\n"
+                        f"The user asked to keep **{fname}** loaded, but the server "
+                        f"couldn't download/parse it (the file is likely too large "
+                        f"and the read timed out). Tell the user honestly and suggest "
+                        f"they click **Load Project** again, then retry."
+                    )
+    elif intent == "keep_current":
+        if current_file and current_file.get("id"):
+            fid = current_file["id"]
+            fname = current_file.get("name", "unknown")
+            if _manuscript_text_if_target(fid) is not None:
+                logger.info("Loaded-docs: current tab '%s' is the loaded manuscript; already in context", fname)
+            else:
+                text = await _download_and_parse_file(fid, fname)
+                if text:
+                    _add_loaded_doc(fid, fname, text)
+                else:
+                    clarification_text = (
+                        "## File Scan Failed\n"
+                        f"The user asked to keep **{fname}** loaded, but the server "
+                        f"couldn't download/parse it. Tell the user honestly and "
+                        f"suggest they click **Load Project** again, then retry."
+                    )
+    elif intent == "keep_manuscript":
+        # The manuscript is already _current_doc (in context every turn).
+        logger.info("Loaded-docs: manuscript already in context as _current_doc")
+    elif intent == "remove_named":
+        named = _match_named_file(message)
+        if named:
+            _remove_loaded_doc_by_id(named[0])
+    elif intent == "remove_current":
+        if current_file and current_file.get("id"):
+            _remove_loaded_doc_by_id(current_file["id"])
+    elif intent == "remove_all":
+        n = len(_loaded_docs)
+        _loaded_docs = []
+        logger.info("Loaded-docs: cleared all (%d removed)", n)
+
+    if intent == "focus_named":
+        named = _match_named_file(message)
+        if named:
+            fid, fname = named
+            ms_text = _manuscript_text_if_target(fid)
+            if ms_text is not None:
+                # Named file is the loaded manuscript — use in-memory parse.
+                full_manuscript_content = ms_text
+            elif _is_kept_doc(fid):
+                # Already kept — injected every turn via the Loaded Documents
+                # block. Don't re-inject as a one-shot focused file: it would
+                # duplicate the content in the prompt (and double-count in the
+                # meter). Dedup by document id, per the meter's contract.
+                logger.info("Focus file: '%s' already kept; skipping one-shot inject", fname)
+            else:
+                focus_id, focused_file_name = fid, fname
+                focused_file_content = await _download_and_parse_file(fid, fname)
+                # A named-file scan that fails to download (the usual cause is
+                # a large file timing out) must NOT silently degrade to 3-chunk
+                # retrieval — that leaves the model claiming it "can't see" a
+                # file the user explicitly named. Surface the failure honestly
+                # so the model says so and suggests re-loading the project.
+                if focused_file_content is None:
+                    clarification_text = (
+                        "## File Scan Failed\n"
+                        f"The user asked to scan **{fname}**, but the server "
+                        f"couldn't download/parse it (the file is likely too "
+                        f"large and the read timed out). Do NOT pretend you "
+                        f"can see it, and do NOT answer from the partial "
+                        f"excerpts below. Tell the user honestly that the scan "
+                        f"failed and suggest they click **Load Project** again "
+                        f"(which parses the manuscript in-memory once, avoiding "
+                        f"the per-scan re-download), then retry."
+                    )
+                    focus_id = None
+                    focused_file_name = None
+    elif intent == "focus_current":
+        if current_file and current_file.get("id"):
+            fid = current_file["id"]
+            ms_text = _manuscript_text_if_target(fid)
+            if ms_text is not None:
+                # The tab file is the loaded manuscript — use in-memory parse.
+                full_manuscript_content = ms_text
+            elif _is_kept_doc(fid):
+                # Already kept — injected every turn via the Loaded Documents
+                # block; skip the one-shot inject (dedup by document id).
+                logger.info("Focus file: current tab '%s' already kept; skipping one-shot inject",
+                            current_file.get("name", "unknown"))
+            else:
+                focus_id = fid
+                focused_file_name = current_file.get("name", "unknown")
+                focused_file_content = await _download_and_parse_file(fid, focused_file_name)
+                # Download can time out on large files (the manuscript is the
+                # usual culprit). Don't let that silently degrade a "scan this
+                # document" request to 3-chunk excerpts — fall back to the
+                # in-memory manuscript when one is loaded.
+                if focused_file_content is None and _current_doc is not None:
+                    logger.warning(
+                        "Focus file: download of '%s' failed; falling back to "
+                        "in-memory manuscript (%d chars)",
+                        focused_file_name, len(_current_doc.full_text),
+                    )
+                    full_manuscript_content = _current_doc.full_text
+                    focus_id = None
+                    focused_file_name = None
+    elif intent == "deep_manuscript":
+        if _current_doc is not None:
+            full_manuscript_content = _current_doc.full_text
+            logger.info(
+                "Full-manuscript scan requested (%d chars) — bypassing chunk retrieval",
+                len(full_manuscript_content),
+            )
+    elif intent == "ask":
+        clarification_text = _build_clarification_block(current_file)
+        _awaiting_doc_choice = True
+    elif intent == "offer_scan":
+        # Implicit need for the full doc, single manuscript. Honour the
+        # remembered session preference if any; otherwise offer once.
+        if _scan_preference == "yes" and _current_doc is not None:
+            full_manuscript_content = _current_doc.full_text
+            logger.info(
+                "Auto-scan (preference=yes): injecting full manuscript (%d chars)",
+                len(full_manuscript_content))
+        elif _scan_preference == "no":
+            # User previously declined — answer from targeted chunks.
+            pass
+        else:
+            clarification_text = _build_scan_offer_block()
+            _awaiting_scan_confirmation = True
+    # "targeted" → nothing to inject; retrieve_context handles it
+
+    logger.info(
+        "Scan routing: intent=%s | focused_file=%s | full_manuscript=%s chars | "
+        "clarification=%s | scan_pref=%s",
+        intent,
+        focused_file_name or "(none)",
+        len(full_manuscript_content) if full_manuscript_content else 0,
+        bool(clarification_text),
+        _scan_preference or "(unset)",
+    )
+
+    return (focused_file_content, focused_file_name, focus_id,
+            full_manuscript_content, clarification_text)
+
+
+def _available_document_names(current_file: dict | None) -> list[str]:
+    """Names of documents the user could choose to scan, for the clarification prompt."""
+    names: list[str] = []
+    seen: set[str] = set()
+    if current_file and current_file.get("name"):
+        names.append(current_file["name"])
+        seen.add(current_file["name"].lower())
+    if _current_doc is not None and _current_doc.title:
+        t = _current_doc.title
+        if t.lower() not in seen:
+            names.append(t)
+            seen.add(t.lower())
+    # Project files (names only) — deduped, capped so the prompt stays small.
+    for entries in _project_file_index.values():
+        for e in entries:
+            n = e.get("name", "")
+            if n and n.lower() not in seen:
+                seen.add(n.lower())
+                names.append(n)
+        if len(names) >= 30:
+            break
+    return names
+
+
+def _build_clarification_block(current_file: dict | None) -> str:
+    """The injected instruction that makes the LLM ask which document to scan."""
+    lines = [
+        "## Clarification Needed",
+        "",
+        "The user's question appears to need the full content of a specific document, "
+        "but it isn't clear which one. Do NOT attempt to answer from any partial "
+        "excerpts — ask the user which document to scan first, then wait for their reply.",
+        "",
+    ]
+    names = _available_document_names(current_file)
+    if names:
+        lines.append("Documents available to scan:")
+        for n in names:
+            lines.append(f"- {n}")
+        lines.append("")
+    lines.append(
+        "Ask something like: \"Do you want me to scan the document you're currently "
+        "viewing, the loaded manuscript, or another project file? If another, tell me "
+        "its name.\" Then wait — do not answer the original question yet."
+    )
+    return "\n".join(lines)
+
+
+def _build_scan_offer_block() -> str:
+    """The injected instruction that makes the LLM offer a quick deep scan."""
+    return "\n".join([
+        "## Proactive Scan Offer",
+        "",
+        "The user's question looks like it would benefit from the full document, but "
+        "the targeted excerpts in context may not be enough to answer it well — and the "
+        "user hasn't explicitly asked you to scan.",
+        "",
+        "Offer a quick scan and wait for a yes/no. Ask something like: \"Do you want me "
+        "to scan this document really quickly so I can answer with the full context?\" "
+        "Then STOP — do not attempt to answer the original question yet. If they say "
+        "yes, the full document will be provided next turn; if no, answer from what you "
+        "have.",
+    ])
+
+
+_YES_TOKENS = ("yes", "yeah", "yep", "sure", "please", "go ahead", "do it", "okay", "ok")
+_NO_TOKENS = ("no", "nope", "nah", "skip", "later", "not now", "don't", "dont")
+
+
+def _is_affirmative(message: str) -> bool:
+    m = message.lower().strip()
+    return any(t in m for t in _YES_TOKENS)
+
+
+def _is_negative(message: str) -> bool:
+    m = message.lower().strip()
+    return any(t in m for t in _NO_TOKENS)
 
 
 def _build_user_message(
@@ -409,6 +1129,8 @@ def _build_user_message(
     current_file: Optional[dict] = None,
     session_focus: Optional[str] = None,
     focused_file_content: Optional[str] = None,
+    full_manuscript_content: Optional[str] = None,
+    clarification_text: Optional[str] = None,
 ) -> str:
     """Build the enriched user message with retrieved context."""
     global _current_doc, _current_comments, _image_cache
@@ -429,6 +1151,43 @@ def _build_user_message(
             parts.append(f"## Session Focus: {session_focus}\n{desc}\n")
             parts.append("---\n")
 
+    # Clarification — either "which document?" (ambiguous target) or a
+    # proactive "want me to scan?" offer (implicit need, single manuscript).
+    # In both cases the LLM should ask and wait, NOT answer from partial
+    # excerpts, so retrieval is skipped this turn.
+    if clarification_text:
+        parts.append(clarification_text)
+        parts.append("---\n")
+
+    # Full manuscript — injected when the user asks to scan/read the *loaded*
+    # document (e.g. "scan the manuscript", "read the whole document") but
+    # hasn't named a specific project file. Without this, a "scan" request
+    # falls through to keyword retrieval, which only ever sends the top 3
+    # matching chunks — so content the query keywords don't overlap (like a
+    # newly added figure legend near the end) is never seen by the model.
+    # Cap the body so a very large manuscript can't blow the context budget;
+    # the truncation note tells the model (and user) the tail was dropped.
+    if full_manuscript_content and _current_doc is not None:
+        cap = 80000  # ~20k tokens — leaves room for comments/history/response
+        body = full_manuscript_content
+        truncation_note = ""
+        if len(body) > cap:
+            body = body[:cap]
+            truncation_note = (
+                "\n\n[... TRUNCATED: the manuscript is longer than the context "
+                "budget allows. The first ~80k characters are shown above; the "
+                "remainder was cut. Ask about a specific section to retrieve it.]"
+            )
+        parts.append(
+            f"## Full Manuscript: {_current_doc.title}\n"
+            f"The user asked to scan/read the FULL document. Below is the complete "
+            f"text (with section headers). Treat this as the source of truth for "
+            f"any question about the document's content — do not claim you cannot "
+            f"see text that appears here.{truncation_note}\n\n"
+        )
+        parts.append(body)
+        parts.append("\n---\n")
+
     # Focused file — full content injected when user asks to scan/read a file
     if focused_file_content and current_file and current_file.get("name"):
         parts.append(
@@ -442,7 +1201,7 @@ def _build_user_message(
         )
         parts.append(focused_file_content)
         parts.append("---\n")
-    elif current_file and current_file.get("name"):
+    elif current_file and current_file.get("name") and not full_manuscript_content:
         parts.append(
             f"## Current File\n"
             f"The user is currently viewing this file from the project: **{current_file['name']}**"
@@ -466,19 +1225,49 @@ def _build_user_message(
         except Exception:
             pass
 
-    # Retrieved context
-    if _current_doc and (include_paper or include_comments):
+    # Retrieved context — skipped when asking a clarification (we don't want
+    # the model answering from partial chunks instead of asking).
+    if not clarification_text and _current_doc and (include_paper or include_comments):
         memory = get_current_memory()
         chat_history = memory.chat_history if memory else []
 
+        # When the full manuscript is already injected above, skip the top-k
+        # paper-chunk retrieval (redundant) — still pull reviewer comments
+        # and recent chat history.
         context = retrieve_context(
             query=message,
             doc=_current_doc,
             comments=_current_comments,
             chat_history=[t.model_dump() for t in chat_history],
+            include_paper_chunks=not bool(full_manuscript_content),
         )
         if context:
             parts.append(context)
+            parts.append("---\n")
+
+    # Loaded documents — project files the user asked to keep in context
+    # across turns. Injected every turn (like web-scraped papers), capped
+    # per-doc so a few large files don't blow the budget. Distinct from the
+    # one-shot "Focused File" block above, which is a single-turn injection.
+    if _loaded_docs:
+        parts.append("## Loaded Documents\n")
+        parts.append(
+            "These project files were explicitly kept loaded in context. They "
+            "stay available across turns until the user asks to remove them. "
+            "Treat their text as source material alongside the manuscript.\n"
+        )
+        cap = 80000  # ~20k tokens — matches the full-manuscript cap
+        for d in _loaded_docs:
+            body = d["text"]
+            truncation_note = ""
+            if len(body) > cap:
+                body = body[:cap]
+                truncation_note = (
+                    f"\n\n[... TRUNCATED: only the first ~{cap} characters are kept "
+                    f"in persistent context. To see content near the end, ask me to "
+                    f"scan this file in full.]"
+                )
+            parts.append(f"### Kept File: {d['name']}\n{body}{truncation_note}\n")
             parts.append("---\n")
 
     # Web-scraped papers (accumulate separately from Drive context)
@@ -775,14 +1564,20 @@ async def send_message(req: ChatRequest):
     """Send a message to the revision assistant (streaming SSE)."""
     provider = _get_provider()
 
-    # If the user mentions a trigger phrase while viewing a file or naming a file,
-    # download and parse the full content
-    focused_file_content: str | None = None
-    focused_file_name: str | None = None
-    focus_id, focus_name = _should_focus_file(req.message, req.current_file)
-    if focus_id:
-        focused_file_name = focus_name
-        focused_file_content = await _download_and_parse_file(focus_id, focus_name)
+    # Decide what document content to inject: resolve a pending "which
+    # document?" reply, or classify this message's scan intent.
+    (
+        focused_file_content,
+        focused_file_name,
+        focus_id,
+        full_manuscript_content,
+        clarification_text,
+    ) = await _prepare_scan_context(req.message, req.current_file)
+
+    # Record this turn's scan injection so the context-usage meter reflects
+    # one-shot/deep scans (done before building the system prompt so the
+    # prompt's context-status guidance is current for this turn too).
+    _record_last_turn_scan(focused_file_content, full_manuscript_content, focus_id)
 
     system_prompt = _build_system_prompt()
     user_message = _build_user_message(
@@ -793,7 +1588,13 @@ async def send_message(req: ChatRequest):
         current_file={"name": focused_file_name, "id": focus_id} if focused_file_name else req.current_file,
         session_focus=req.session_focus,
         focused_file_content=focused_file_content,
+        full_manuscript_content=full_manuscript_content,
+        clarification_text=clarification_text,
     )
+
+    # Record the actual prompt size so the panel context meter reflects the
+    # real next/last request (system + user), per the meter's contract.
+    _record_last_request(system_prompt, user_message)
 
     logger.info(
         "Chat request [%s/%s]: '%s...' (system=%d, user=%d chars)",
@@ -837,14 +1638,20 @@ async def send_message_sync(req: ChatRequest):
     """Send a message and get a complete (non-streaming) response."""
     provider = _get_provider()
 
-    # If the user mentions a trigger phrase while viewing a file or naming a file,
-    # download and parse the full content
-    focused_file_content: str | None = None
-    focused_file_name: str | None = None
-    focus_id, focus_name = _should_focus_file(req.message, req.current_file)
-    if focus_id:
-        focused_file_name = focus_name
-        focused_file_content = await _download_and_parse_file(focus_id, focus_name)
+    # Decide what document content to inject: resolve a pending "which
+    # document?" reply, or classify this message's scan intent.
+    (
+        focused_file_content,
+        focused_file_name,
+        focus_id,
+        full_manuscript_content,
+        clarification_text,
+    ) = await _prepare_scan_context(req.message, req.current_file)
+
+    # Record this turn's scan injection so the context-usage meter reflects
+    # one-shot/deep scans (done before building the system prompt so the
+    # prompt's context-status guidance is current for this turn too).
+    _record_last_turn_scan(focused_file_content, full_manuscript_content, focus_id)
 
     system_prompt = _build_system_prompt()
     user_message = _build_user_message(
@@ -855,7 +1662,13 @@ async def send_message_sync(req: ChatRequest):
         current_file={"name": focused_file_name, "id": focus_id} if focused_file_name else req.current_file,
         session_focus=req.session_focus,
         focused_file_content=focused_file_content,
+        full_manuscript_content=full_manuscript_content,
+        clarification_text=clarification_text,
     )
+
+    # Record the actual prompt size so the panel context meter reflects the
+    # real next/last request (system + user), per the meter's contract.
+    _record_last_request(system_prompt, user_message)
 
     try:
         if _is_anthropic_provider(provider["provider"]):
@@ -1064,49 +1877,66 @@ def _get_context_window_size() -> tuple[int, str]:
 
 @router.get("/context-usage")
 async def context_usage():
+    """Estimate the context window usage of the next LLM request.
+
+    Mirrors Claude Code's meter: if tokens are sent to the model, they count.
+    Once at least one request has been built, the meter reflects the ACTUAL
+    size of that request (system_prompt + user_message) — which includes
+    history, retrieved chunks, kept docs, one-shot scans, and injected
+    instructions, deduplicated at the source. A one-shot scan raises it for
+    that request and it drops again when the next request is smaller.
+
+    Before the first request (no measurement yet), fall back to a standing
+    projection so the bar isn't empty on Load Project.
     """
-    Estimate current context window usage per message.
+    window_size, model = _get_context_window_size()
 
-    The full manuscript is NOT sent every message — only the top 3 most
-    relevant chunks are injected via keyword retrieval. This endpoint
-    estimates what's actually sent to the LLM on a typical turn.
-    """
-    ctx = _estimate_context_usage()
-
-    # Recompute individual breakdown components for the frontend
-    system_tokens = _estimate_tokens(SYSTEM_PROMPT)
-    resume_tokens = _estimate_tokens(RESUME_PROMPT_EXTENSION)
-    retrieval_chunks_estimate = 3 * 4000 // 4
-    retrieval_comments_estimate = 5 * 500 // 4
-
-    history_tokens = 0
-    memory = get_current_memory()
-    if memory and memory.chat_history:
-        history_tokens = sum(
-            _estimate_tokens(t.content) for t in memory.chat_history
+    if _last_request_tokens > 0:
+        # Real measurement of the most recent request — the best estimate of
+        # the next one's size. Breakdown sums to total_used by construction.
+        total_used = _last_request_tokens
+        breakdown = {
+            "system_prompt": _last_request_system_tokens,
+            "user_message": _last_request_user_tokens,
+        }
+        source = "last_request"
+    else:
+        # No request sent yet — project the standing baseline.
+        ctx = _estimate_context_usage()
+        total_used = ctx["total_used"]
+        system_tokens = _estimate_tokens(SYSTEM_PROMPT)
+        resume_tokens = _estimate_tokens(RESUME_PROMPT_EXTENSION)
+        history_tokens = 0
+        memory = get_current_memory()
+        if memory and memory.chat_history:
+            history_tokens = sum(_estimate_tokens(t.content) for t in memory.chat_history)
+        scraped_tokens = sum(
+            _estimate_tokens(doc.full_text[:6000]) + 200 for doc in _scraped_docs
         )
-
-    scraped_tokens = sum(
-        _estimate_tokens(doc.full_text[:6000]) + 200
-        for doc in _scraped_docs
-    )
-
-    pct_used = ctx["pct_used"]
-    remaining = ctx["remaining"]
-
-    return {
-        "model": ctx["model"],
-        "window_size": ctx["window_size"],
-        "breakdown": {
+        loaded_tokens = sum(
+            _estimate_tokens(d["text"][:80000]) + 100 for d in _loaded_docs
+        )
+        breakdown = {
             "system_prompt": system_tokens,
             "resume_prompt": resume_tokens,
-            "retrieval_chunks": retrieval_chunks_estimate,
-            "retrieval_comments": retrieval_comments_estimate,
+            "retrieval_chunks": 3 * 4000 // 4,
+            "retrieval_comments": 5 * 500 // 4,
             "chat_history": history_tokens,
             "scraped_papers": scraped_tokens,
+            "loaded_docs": loaded_tokens,
             "message_reserve": 8000,
-        },
-        "total_used": ctx["total_used"],
+        }
+        source = "projected"
+
+    pct_used = round(min((total_used / window_size) * 100, 100), 1)
+    remaining = max(window_size - total_used, 0)
+
+    return {
+        "model": model,
+        "window_size": window_size,
+        "breakdown": breakdown,
+        "source": source,
+        "total_used": total_used,
         "remaining": remaining,
         "pct_used": pct_used,
         "pct_free": round(100 - pct_used, 1),
@@ -1114,6 +1944,8 @@ async def context_usage():
         "manuscript_total_chars": len(_current_doc.full_text) if _current_doc else 0,
         "scraped_papers_count": len(_scraped_docs),
         "scraped_total_chars": sum(len(doc.full_text) for doc in _scraped_docs),
+        "loaded_docs_count": len(_loaded_docs),
+        "loaded_docs": [{"name": d["name"], "chars": len(d["text"])} for d in _loaded_docs],
     }
 
 
@@ -1233,6 +2065,7 @@ async def get_context():
         "comments": comments,
         "images": images,
         "scraped_papers": scraped_papers,
+        "loaded_docs": [{"name": d["name"], "chars": len(d["text"])} for d in _loaded_docs],
     }
 
 
@@ -1286,6 +2119,12 @@ async def reset_all_state():
     global _scraped_docs, _scraped_sources
     global _focused_file_cache
     global _project_file_index
+    global _awaiting_doc_choice
+    global _awaiting_scan_confirmation, _scan_preference
+    global _current_doc_file_id
+    global _loaded_docs
+    global _last_turn_scan_chars
+    global _last_request_tokens, _last_request_system_tokens, _last_request_user_tokens
 
     from memory_manager import (
         get_current_memory,
@@ -1302,6 +2141,7 @@ async def reset_all_state():
         had_comments = len(_current_comments)
         had_scraped = len(_scraped_docs)
         had_memory = existing_memory is not None
+        had_loaded = len(_loaded_docs)
 
         # Flush pending chat exchanges to Drive before wiping — but only if
         # there's unsaved work, so an empty buffer restarts instantly with
@@ -1322,6 +2162,15 @@ async def reset_all_state():
         _scraped_sources = []
         _focused_file_cache = {}
         _project_file_index = {}
+        _awaiting_doc_choice = False
+        _awaiting_scan_confirmation = False
+        _scan_preference = ""
+        _current_doc_file_id = ""
+        _loaded_docs = []
+        _last_turn_scan_chars = 0
+        _last_request_tokens = 0
+        _last_request_system_tokens = 0
+        _last_request_user_tokens = 0
 
     return {
         "status": "reset",
@@ -1331,6 +2180,7 @@ async def reset_all_state():
             "comments": had_comments,
             "scraped_papers": had_scraped,
             "memory": had_memory,
+            "loaded_docs": had_loaded,
         },
     }
 
@@ -1345,6 +2195,12 @@ async def unload_project():
     global _current_doc, _current_comments, _image_cache, _current_doc_source
     global _focused_file_cache
     global _project_file_index
+    global _awaiting_doc_choice
+    global _awaiting_scan_confirmation, _scan_preference
+    global _current_doc_file_id
+    global _loaded_docs
+    global _last_turn_scan_chars
+    global _last_request_tokens, _last_request_system_tokens, _last_request_user_tokens
 
     from memory_manager import (
         get_current_memory,
@@ -1359,6 +2215,7 @@ async def unload_project():
         had_paper = _current_doc is not None
         had_comments = len(_current_comments)
         had_memory = existing_memory is not None
+        had_loaded = len(_loaded_docs)
 
         # Flush pending exchanges to Drive before dropping the project context
         # — only if there's unsaved work.
@@ -1376,6 +2233,15 @@ async def unload_project():
         _focused_file_cache = {}
         _current_doc_source = ""
         _project_file_index = {}
+        _awaiting_doc_choice = False
+        _awaiting_scan_confirmation = False
+        _scan_preference = ""
+        _current_doc_file_id = ""
+        _loaded_docs = []
+        _last_turn_scan_chars = 0
+        _last_request_tokens = 0
+        _last_request_system_tokens = 0
+        _last_request_user_tokens = 0
 
     return {
         "status": "unloaded",
@@ -1384,6 +2250,7 @@ async def unload_project():
             "manuscript": had_paper,
             "comments": had_comments,
             "memory": had_memory,
+            "loaded_docs": had_loaded,
         },
         "scraped_preserved": len(_scraped_docs),
     }

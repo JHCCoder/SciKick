@@ -551,7 +551,15 @@ async def load_context(folder_id: str, force: bool = False):
         extract_reviewer_comments,
         extract_reviewer_comments_from_sheets,
     )
-    from chat_handler import set_project_context, set_project_file_index, _current_doc, _current_comments, _current_doc_source
+    from chat_handler import (
+        set_project_context,
+        set_project_file_index,
+        _current_doc,
+        _current_comments,
+        _current_doc_source,
+        _focused_file_cache,
+        _loaded_docs,
+    )
 
     # 1. Initialise or retrieve memory
     from memory_manager import (
@@ -607,6 +615,14 @@ async def load_context(folder_id: str, force: bool = False):
     # Only skip re-parse if the current doc actually came from THIS folder
     # (a scraped webpage would have a different source and must be replaced)
     same_folder = _current_doc_source == f"drive:{folder_id}"
+    # Enforce "at most one project loaded": when switching to a DIFFERENT
+    # folder, drop kept documents from the previous project so they can't
+    # bleed into the new one. (.clear() mutates the shared list — reassigning
+    # would only rebind this local name.) Same-folder reloads keep them.
+    if not same_folder and _loaded_docs:
+        n = len(_loaded_docs)
+        _loaded_docs.clear()
+        logger.info("load-context: switched folder — cleared %d kept document(s)", n)
     if not force and not new_ids and not changed_ids and _current_doc is not None and same_folder:
         logger.info("load-context: no files changed — skipping re-parse")
         return {
@@ -636,6 +652,12 @@ async def load_context(folder_id: str, force: bool = False):
             "load-context: %d new, %d changed, %d unchanged (of %d total)",
             len(new_ids), len(changed_ids), len(unchanged_ids), len(all_files),
         )
+
+    # Any file may have changed on Drive since the last load — drop the
+    # focused-file cache so a subsequent "scan <file>" re-downloads fresh
+    # content instead of returning a stale parse from before the edit.
+    if force or new_ids or changed_ids:
+        _focused_file_cache.clear()
 
     # 4. Find the manuscript
     manuscript_file = _find_manuscript(all_files)
@@ -735,7 +757,9 @@ async def load_context(folder_id: str, force: bool = False):
     logger.info("load-context: %d images cached (%d new/changed)", len(images), len(changed_images))
 
     # 7. Load into chat handler
-    set_project_context(doc, comments, images, source=f"drive:{folder_id}")
+    # Pass the manuscript's Drive file id so a later scan/focus request for
+    # that same file can reuse the in-memory parse instead of re-downloading.
+    set_project_context(doc, comments, images, source=f"drive:{folder_id}", doc_file_id=ms_id)
     set_project_file_index(all_files)  # Build file name→id index for file-focus feature
 
     # 8. Update memory with paper sections, comment states, and file snapshots
@@ -799,30 +823,80 @@ async def load_context(folder_id: str, force: bool = False):
 
 
 def _find_manuscript(files: list[dict]) -> Optional[dict]:
-    """Find the most likely manuscript file in a list of Drive files."""
+    """Find the most likely manuscript file in a list of Drive files.
+
+    A revision folder typically holds the main manuscript *and* a supplemental
+    material file — often both .docx, both with "manuscript" in the name, and
+    the supplement is frequently the LARGER file (embedded figures). So neither
+    "first keyword match" nor "largest preferred-type file" reliably picks the
+    main text. We instead (1) strongly prefer files whose name says "main",
+    and (2) exclude anything that looks like supporting material.
+    """
     manuscript_keywords = ["manuscript", "paper", "draft", "article", "submission"]
+    # Substrings that mark a file as supporting material, not the main text.
+    # Kept conservative to avoid false positives on legitimate filenames.
+    supplemental_markers = (
+        "supplement", "supplementary", "supplemental",
+        "supporting information", "supporting-material",
+        "appendix", "response to reviewer", "cover letter",
+    )
+    # Substrings that mark a file as the main text.
+    main_markers = ("main submission", "main text", "main manuscript",
+                    "main_manuscript", "main_submission", "full text",
+                    "main document")
     preferred_types = [
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
         "application/pdf",
         "application/vnd.google-apps.document",
     ]
 
-    # First pass: look for keyword + preferred type
-    for kw in manuscript_keywords:
-        for f in files:
-            if kw in f["name"].lower() and f["mimeType"] in preferred_types:
-                return f
+    def name(f: dict) -> str:
+        return f["name"].lower()
 
-    # Second pass: largest preferred-type file
+    def is_supplement(f: dict) -> bool:
+        n = name(f)
+        return any(m in n for m in supplemental_markers)
+
+    def is_main(f: dict) -> bool:
+        n = name(f)
+        return any(m in n for m in main_markers)
+
+    def largest(seq: list[dict]) -> Optional[dict]:
+        # Tie-break by size so a multi-file folder still picks deterministically.
+        seq.sort(key=lambda f: f["size"], reverse=True)
+        return seq[0] if seq else None
+
     candidates = [f for f in files if f["mimeType"] in preferred_types]
-    if candidates:
-        candidates.sort(key=lambda f: f["size"], reverse=True)
-        return candidates[0]
 
-    # Third pass: any file with a paper-like extension
+    # 1. A preferred-type file explicitly named "main" that isn't a supplement.
+    main_candidates = [f for f in candidates if is_main(f) and not is_supplement(f)]
+    if main_candidates:
+        return largest(main_candidates)
+
+    # 2. A preferred-type file matching a manuscript keyword, excluding
+    #    supplements (this is where the old code went wrong — it matched the
+    #    supplement because "manuscript" appears in its name too).
+    keyword_candidates = [
+        f for f in candidates
+        if not is_supplement(f) and any(kw in name(f) for kw in manuscript_keywords)
+    ]
+    if keyword_candidates:
+        return largest(keyword_candidates)
+
+    # 3. Any non-supplement preferred-type file.
+    non_supp = [f for f in candidates if not is_supplement(f)]
+    if non_supp:
+        return largest(non_supp)
+
+    # 4. Last resort: largest preferred-type file even if it looks supplemental
+    #    (better than nothing — the folder may contain only the supplement).
+    if candidates:
+        return largest(candidates)
+
+    # 5. No preferred type — fall back to a paper-like extension.
     for ext in (".pdf", ".docx"):
         for f in files:
-            if f["name"].lower().endswith(ext):
+            if name(f).endswith(ext):
                 return f
 
     return None
