@@ -422,12 +422,12 @@ async def _download_and_parse_file(file_id: str, file_name: str) -> str | None:
         parsed_text = ""
 
         if mime == "application/pdf" and "content_bytes" in downloaded:
-            from context_engine import parse_pdf
+            from file_processor import parse_pdf
             content_bytes = bytes.fromhex(downloaded["content_bytes"])
             doc = parse_pdf(content_bytes, file_name)
             parsed_text = doc.full_text
         elif mime in ("application/vnd.openxmlformats-officedocument.wordprocessingml.document",) and "content_bytes" in downloaded:
-            from context_engine import parse_docx
+            from file_processor import parse_docx
             content_bytes = bytes.fromhex(downloaded["content_bytes"])
             doc = parse_docx(content_bytes, file_name)
             parsed_text = doc.full_text
@@ -444,7 +444,7 @@ async def _download_and_parse_file(file_id: str, file_name: str) -> str | None:
         elif "text" in downloaded:
             parsed_text = downloaded["text"]
         elif "content_bytes" in downloaded:
-            from context_engine import parse_text
+            from file_processor import parse_text
             raw = bytes.fromhex(downloaded["content_bytes"]).decode("utf-8", errors="replace")
             doc = parse_text(raw, file_name)
             parsed_text = doc.full_text

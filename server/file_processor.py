@@ -108,22 +108,77 @@ def parse_pdf(content: bytes, filename: str) -> PaperDocument:
 
 
 def parse_docx(content: bytes, filename: str) -> PaperDocument:
-    """Extract text from a .docx file."""
+    """Extract text from a .docx file, including table cell text.
+
+    python-docx exposes ``.paragraphs`` and ``.tables`` as separate lists,
+    which discards table contents *and* loses document order. We walk the
+    body's block-level children (``w:p`` / ``w:tbl``) in order so tables are
+    rendered where they actually sit in the document, alongside their
+    captions and surrounding paragraphs.
+    """
     from docx import Document as DocxDocument
+    from docx.document import Document as _Document
+    from docx.oxml.table import CT_Tbl
+    from docx.oxml.text.paragraph import CT_P
+    from docx.table import Table, _Cell
+    from docx.text.paragraph import Paragraph
 
     doc = PaperDocument(title=filename, raw_format="docx")
     docx = DocxDocument(io.BytesIO(content))
 
+    def iter_block_items(parent):
+        """Yield Paragraph and Table objects in document order."""
+        if isinstance(parent, _Document):
+            parent_elm = parent.element.body
+        elif isinstance(parent, _Cell):
+            parent_elm = parent._tc
+        else:
+            return
+        for child in parent_elm.iterchildren():
+            if isinstance(child, CT_P):
+                yield Paragraph(child, parent)
+            elif isinstance(child, CT_Tbl):
+                yield Table(child, parent)
+
+    def table_to_text(table: Table) -> str:
+        """Render a table as pipe-delimited rows (markdown-style)."""
+        rows = []
+        for row in table.rows:
+            cells = []
+            for cell in row.cells:
+                # A cell may hold multiple paragraphs; join and flatten
+                # internal newlines so each row stays a single line.
+                cell_text = "\n".join(p.text for p in cell.paragraphs)
+                cell_text = re.sub(r"\s+", " ", cell_text).strip()
+                cells.append(cell_text)
+            rows.append(" | ".join(cells))
+        if not rows:
+            return ""
+        # First row as header + separator → a markdown table the LLM reads
+        # as structured data rather than free text.
+        header = rows[0]
+        sep = " | ".join("---" for _ in rows[0].split(" | "))
+        return "\n".join([header, sep, *rows[1:]])
+
     full_text_parts = []
-    for para in docx.paragraphs:
-        full_text_parts.append(para.text)
+    n_paragraphs = 0
+    n_tables = 0
+    for block in iter_block_items(docx):
+        if isinstance(block, Paragraph):
+            full_text_parts.append(block.text)
+            n_paragraphs += 1
+        elif isinstance(block, Table):
+            rendered = table_to_text(block)
+            if rendered:
+                full_text_parts.append(rendered)
+                n_tables += 1
 
     doc.full_text = "\n\n".join(full_text_parts)
     doc.sections = _parse_sections(doc.full_text)
     doc.title, doc.abstract, doc.authors = _extract_metadata(doc.full_text)
 
-    logger.info("Parsed DOCX '%s': %d paragraphs, %d sections",
-                 filename, len(docx.paragraphs), len(doc.sections))
+    logger.info("Parsed DOCX '%s': %d paragraphs, %d tables, %d sections",
+                 filename, n_paragraphs, n_tables, len(doc.sections))
     return doc
 
 

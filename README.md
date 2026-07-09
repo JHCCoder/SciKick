@@ -379,7 +379,7 @@ Before your first message of a session the bar shows a rough projection; after t
 
 ### Notes on extraction
 
-- Text and figure legends are extracted from `.docx`/`.pdf`; **table-cell text is not** (tables in `.docx` are skipped by the parser).
+- Text and figure legends are extracted from `.docx`/`.pdf`. In `.docx`, **table cell text is also extracted** (rendered as markdown-style tables, in document order). PDF tables are not reconstructed — only flowed text is read.
 - Very large files are capped per document, but the cap **scales with your model's context window** (roughly half the window for a one-shot scan, a quarter for a kept doc). On a 1M-token model a typical manuscript or supplement loads in full; on a 128k-token model the cap is ~256k characters. If a file exceeds the cap, only the first portion is loaded and the model will tell you it was truncated and suggest asking about a specific section for the rest.
 - Kept text is frozen at keep-time. If you edit a kept file on Drive, click **Load Project** (same folder — it preserves your kept list) and re-keep that file to refresh it.
 

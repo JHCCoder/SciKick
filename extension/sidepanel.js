@@ -1486,7 +1486,7 @@ function initTabBar() {
   // One-click scan & keep of the file currently viewed in the browser tab.
   dom.btnScanTab.addEventListener("click", () => {
     if (!viewingFile || !viewingFile.name) return;
-    dom.chatInput.value = `scan and keep ${viewingFile.name}`;
+    dom.chatInput.value = `scan and keep ${viewingFile.name} in context`;
     sendMessage();
   });
 
@@ -1693,14 +1693,14 @@ async function init() {
       }
 
       // --- Scan & keep a project file (click its row in the tree) ---
-      // Sends "scan and keep <filename>" so the server matches it exactly
-      // (literal-substring) and adds it to the loaded-documents set — no
-      // reliance on tab detection or phrasing.
+      // Sends "scan and keep <filename> in context" so the server matches it
+      // exactly (literal-substring) and adds it to the loaded-documents set —
+      // no reliance on tab detection or phrasing.
       const fileRow = e.target.closest(".tree-file-row");
       if (fileRow) {
         const name = fileRow.dataset.fileName;
         if (name) {
-          dom.chatInput.value = `scan and keep ${name}`;
+          dom.chatInput.value = `scan and keep ${name} in context`;
           closeInfoPanel();
           sendMessage();
         }
