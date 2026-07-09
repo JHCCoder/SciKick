@@ -310,6 +310,42 @@ async def download_file(file_id: str):
     return await _run_in_thread(_download_file_sync, file_id)
 
 
+# MediaIoBaseDownload defaults to a 100 MB chunk, so a large file is fetched
+# in a single next_chunk() — one timeout fails the whole download and a retry
+# restarts from zero. A 2 MB chunk lets resumed retries accumulate progress.
+_DOWNLOAD_CHUNK_SIZE = 2 * 1024 * 1024
+
+
+def _download_media_with_retry(downloader, file_id: str) -> None:
+    """Run a MediaIoBaseDownload to completion, resuming past transient failures.
+
+    Drive reads of large files (e.g. an 11 MB supplement) can time out
+    mid-stream ("The read operation timed out"). MediaIoBaseDownload tracks
+    progress and resumes from the last byte on the next ``next_chunk()``, so
+    retrying the same downloader accumulates progress instead of restarting —
+    a marginal timeout that kills a one-shot download completes over a few
+    resumed chunks.
+    """
+    done = False
+    attempts = 0
+    while not done:
+        try:
+            _, done = downloader.next_chunk()
+        except Exception as exc:
+            attempts += 1
+            if attempts >= 5:
+                logger.error(
+                    "Drive download of %s failed after %d attempts: %s",
+                    file_id, attempts, exc,
+                )
+                raise
+            logger.warning(
+                "Drive download of %s: chunk failed (attempt %d): %s — resuming",
+                file_id, attempts, exc,
+            )
+            time.sleep(1.0 * attempts)
+
+
 def _download_file_sync(file_id: str) -> dict:
     """Blocking core of :func:`download_file`. Run via :func:`_run_in_thread`."""
     service = get_drive_service()
@@ -333,10 +369,8 @@ def _download_file_sync(file_id: str) -> dict:
         # Binary download
         request = service.files().get_media(fileId=file_id)
         buffer = io.BytesIO()
-        downloader = MediaIoBaseDownload(buffer, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
+        downloader = MediaIoBaseDownload(buffer, request, chunksize=_DOWNLOAD_CHUNK_SIZE)
+        _download_media_with_retry(downloader, file_id)
 
         return {
             "name": file_name,
@@ -351,10 +385,8 @@ def _export_google_file(service, file_id: str, mime_type: str) -> str:
 
     request = service.files().export_media(fileId=file_id, mimeType=mime_type)
     buffer = io.BytesIO()
-    downloader = MediaIoBaseDownload(buffer, request)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
+    downloader = MediaIoBaseDownload(buffer, request, chunksize=_DOWNLOAD_CHUNK_SIZE)
+    _download_media_with_retry(downloader, file_id)
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
@@ -364,10 +396,8 @@ def _export_google_doc(service, file_id: str, file_name: str) -> dict:
         fileId=file_id, mimeType="text/markdown"
     )
     buffer = io.BytesIO()
-    downloader = MediaIoBaseDownload(buffer, request)
-    done = False
-    while not done:
-        _, done = downloader.next_chunk()
+    downloader = MediaIoBaseDownload(buffer, request, chunksize=_DOWNLOAD_CHUNK_SIZE)
+    _download_media_with_retry(downloader, file_id)
     content = buffer.getvalue().decode("utf-8")
     return {"name": file_name, "mimeType": "text/markdown", "text": content}
 
@@ -440,7 +470,7 @@ def _load_memory_file_sync(folder_id: str) -> dict:
     memory_id = files[0]["id"]
     request = service.files().get_media(fileId=memory_id)
     buffer = io.BytesIO()
-    downloader = MediaIoBaseDownload(buffer, request)
+    downloader = MediaIoBaseDownload(buffer, request, chunksize=_DOWNLOAD_CHUNK_SIZE)
     done = False
     while not done:
         _, done = downloader.next_chunk()
