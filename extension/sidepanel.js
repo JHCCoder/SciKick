@@ -1022,6 +1022,7 @@ async function loadInfoPanel() {
       html += `<div class="info-row"><span class="info-label">Total files</span><span class="info-value">${projectFiles.length}</span></div>`;
       html += `<div class="info-row"><span class="info-label">Papers</span><span class="info-value">${tree.paperCount}</span></div>`;
       html += `<div class="info-row"><span class="info-label">Sheets</span><span class="info-value">${tree.sheetCount}</span></div>`;
+      html += `<div class="info-row"><span class="info-label">Tip</span><span class="info-value">Click a file to scan &amp; keep it in context</span></div>`;
       html += '<div class="tree-root">';
       html += renderFileTree(tree, 0);
       html += '</div>';
@@ -1244,10 +1245,12 @@ function renderFileTree(node, depth) {
     else if (node.isSheet) icon = "📊";
 
     return (
-      `<div class="tree-row" style="padding-left:${depth * 14 + 18}px">` +
+      `<div class="tree-row tree-file-row" style="padding-left:${depth * 14 + 18}px" ` +
+      `data-file-name="${escHtml(node.name)}" title="Click to scan & keep this file in context">` +
       `<span class="tree-icon">${icon}</span>` +
-      `<span class="tree-name" title="${escHtml(node.name)}">${escHtml(node.name)}</span>` +
+      `<span class="tree-name">${escHtml(node.name)}</span>` +
       `<span class="tree-size">${formatSize(node.size)}</span>` +
+      `<span class="tree-keep-hint">📌 keep</span>` +
       `</div>`
     );
   }
@@ -1674,6 +1677,21 @@ async function init() {
             }
           }
         }
+      }
+
+      // --- Scan & keep a project file (click its row in the tree) ---
+      // Sends "scan and keep <filename>" so the server matches it exactly
+      // (literal-substring) and adds it to the loaded-documents set — no
+      // reliance on tab detection or phrasing.
+      const fileRow = e.target.closest(".tree-file-row");
+      if (fileRow) {
+        const name = fileRow.dataset.fileName;
+        if (name) {
+          dom.chatInput.value = `scan and keep ${name}`;
+          closeInfoPanel();
+          sendMessage();
+        }
+        return;
       }
 
       // --- Delete scraped article ---

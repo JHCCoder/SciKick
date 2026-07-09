@@ -461,6 +461,81 @@ async def _download_and_parse_file(file_id: str, file_name: str) -> str | None:
         return None
 
 
+def _filename_tokens(name: str) -> set[str]:
+    """Tokens from a filename: lowercase alnum runs of length >= 4.
+
+    Used for fuzzy name matching so "supplemental material" / "reviewer
+    comments" can match a file whose real name is underscored. Short runs
+    (e.g. "02", "fcs", "br") are dropped — they aren't distinctive.
+    """
+    return set(re.findall(r"[a-z0-9]{4,}", name.lower()))
+
+
+def _match_named_file_by_tokens(message: str) -> tuple[str, str] | None:
+    """Fallback matcher: find a project file by distinctive filename tokens.
+
+    Lets the user say "scan the supplemental material" or "scan the reviewer
+    comments" without typing the literal underscored filename. A token matches
+    if the user's word equals it or one is a prefix of the other (so
+    "supplement" matches "supplemental", "comments" matches "comment"). Only
+    tokens DISTINCTIVE to a single file count — "manuscript" appears in both
+    the main and supplement names, so it can't decide a match on its own.
+    """
+    global _project_file_index
+    files: list[dict] = []
+    seen_ids: set[str] = set()
+    for entries in _project_file_index.values():
+        for e in entries:
+            fid = e.get("id")
+            if fid and fid not in seen_ids:
+                seen_ids.add(fid)
+                files.append(e)
+    if not files:
+        return None
+
+    token_file_count: dict[str, int] = {}
+    file_tokens: list[tuple[dict, set[str]]] = []
+    for f in files:
+        toks = _filename_tokens(f.get("name", ""))
+        file_tokens.append((f, toks))
+        for t in toks:
+            token_file_count[t] = token_file_count.get(t, 0) + 1
+
+    msg_tokens = _filename_tokens(message)
+    if not msg_tokens:
+        return None
+
+    def _tok_match(w: str, t: str) -> bool:
+        # exact, or one is a prefix of the other (min 4 chars) — covers
+        # "supplement"→"supplemental" and "comments"→"comment".
+        if w == t:
+            return True
+        if len(w) >= 4 and len(t) >= 4:
+            return t.startswith(w) or w.startswith(t)
+        return False
+
+    best_file: dict | None = None
+    best_score = 0
+    for f, toks in file_tokens:
+        score = 0
+        for t in toks:
+            if token_file_count.get(t, 0) != 1:
+                continue  # not distinctive — appears in multiple filenames
+            if any(_tok_match(w, t) for w in msg_tokens):
+                score += 1
+        if score > best_score:
+            best_score = score
+            best_file = f
+
+    if best_file is None or best_score < 1:
+        return None
+    logger.info(
+        "Focus file: token-matched '%s' (score=%d), file_id=%s",
+        best_file.get("name"), best_score, best_file.get("id"),
+    )
+    return best_file["id"], best_file["name"]
+
+
 def _match_named_file(message: str) -> tuple[str, str] | None:
     """Return (file_id, file_name) if the message mentions a project file by name.
 
@@ -469,6 +544,9 @@ def _match_named_file(message: str) -> tuple[str, str] | None:
     should win, otherwise a duplicate basename in another subfolder could
     shadow the intended file. No trigger-phrase gate: this is pure name
     matching, reused by both the explicit-scan and choice-resolution paths.
+
+    Falls back to distinctive-token matching so natural phrasing ("scan the
+    supplemental material") works without typing the literal underscored name.
     """
     msg_lower = message.lower()
     global _project_file_index
@@ -481,21 +559,22 @@ def _match_named_file(message: str) -> tuple[str, str] | None:
                 best_key = fname_lower
                 best_entries = entries
 
-    if best_entries is None:
-        return None
+    if best_entries is not None:
+        entry = best_entries[0]
+        if len(best_entries) > 1:
+            # Duplicate basenames across subfolders — pick the first and warn;
+            # the user can disambiguate by naming the full path.
+            logger.warning(
+                "Focus file: '%s' matches %d files; using the first (id=%s). "
+                "Specify the full path to pick a different one.",
+                best_key, len(best_entries), entry["id"],
+            )
+        else:
+            logger.info("Focus file: matched '%s' in message, file_id=%s", best_key, entry["id"])
+        return entry["id"], entry["name"]
 
-    entry = best_entries[0]
-    if len(best_entries) > 1:
-        # Duplicate basenames across subfolders — pick the first and warn;
-        # the user can disambiguate by naming the full path.
-        logger.warning(
-            "Focus file: '%s' matches %d files; using the first (id=%s). "
-            "Specify the full path to pick a different one.",
-            best_key, len(best_entries), entry["id"],
-        )
-    else:
-        logger.info("Focus file: matched '%s' in message, file_id=%s", best_key, entry["id"])
-    return entry["id"], entry["name"]
+    # No literal-substring match — try distinctive-token matching.
+    return _match_named_file_by_tokens(message)
 
 
 # Phrases that point at the *currently-viewed* browser-tab file vs. the *loaded
@@ -627,6 +706,11 @@ def _classify_scan_intent(
         # Explicit scan but no target resolved.
         if multi_candidate:
             return "ask"  # two plausible targets — let the user pick
+        # "scan this file/document" with no recognized tab — don't silently
+        # fall back to the manuscript if there are other project files to pick
+        # from; ask which one the user means.
+        if wants_current and not has_current_file and _has_other_project_files():
+            return "ask"
         if has_manuscript:
             return "deep_manuscript"  # only candidate available
         if has_current_file:
@@ -751,6 +835,22 @@ def _remove_loaded_doc_by_id(file_id: str) -> bool:
 def _is_kept_doc(file_id: Optional[str]) -> bool:
     """True if a file is already in the persistent loaded-documents set."""
     return bool(file_id) and any(d["file_id"] == file_id for d in _loaded_docs)
+
+
+def _has_other_project_files() -> bool:
+    """True if the project file index has any file other than the loaded manuscript.
+
+    Used to decide whether "scan this document" (with no recognized tab) should
+    ask which file the user means rather than silently scanning the manuscript.
+    """
+    if not _project_file_index:
+        return False
+    for entries in _project_file_index.values():
+        for e in entries:
+            fid = e.get("id")
+            if fid and fid != _current_doc_file_id:
+                return True
+    return False
 
 
 def _record_last_turn_scan(

@@ -345,7 +345,7 @@ Say `scan this file`, `scan this document`, or `scan <filename>` to pull a file'
 - "scan this document and review my Figure S18ex legend"
 - "scan the reviewer PDF — what are the main concerns?"
 
-The content is sent to the model for that request and then dropped — follow-up questions won't see it unless you scan again. The parsed text is cached, so re-scanning the same file is instant (no re-download). You can name a file by typing part of its filename; SciKick finds it in your Drive folder.
+The content is sent to the model for that request and then dropped — follow-up questions won't see it unless you scan again. The parsed text is cached, so re-scanning the same file is instant (no re-download). You can name a file naturally ("scan the supplemental material", "scan the reviewer comments") — SciKick matches it to a file in your Drive folder by distinctive name tokens, so you don't need to type the exact underscored filename.
 
 ### Keep — for a whole line of questioning
 
@@ -355,6 +355,8 @@ Say `scan and keep <filename>`, `keep this document loaded`, or `also load <file
 - "keep this document loaded"
 
 Kept files persist across all your subsequent questions. Keep as many as you like — they stay until you remove them or switch projects. The ℹ Info panel lists everything currently kept under 📌 **Loaded Documents**.
+
+You can also **click any file in the ℹ Info panel's Project Data tree** to scan-and-keep it — no phrasing needed. Hover a file to see the "📌 keep" hint.
 
 Remove a file with:
 - `remove this document` — the file open in your browser tab

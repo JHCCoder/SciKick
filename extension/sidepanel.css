@@ -482,10 +482,20 @@ body {
   white-space: nowrap;
 }
 .tree-file .tree-row {
-  cursor: default;
+  cursor: pointer;
 }
 .tree-file .tree-name:hover {
   color: var(--accent);
+}
+.tree-keep-hint {
+  flex-shrink: 0;
+  font-size: 9px;
+  color: var(--text-secondary);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.tree-file-row:hover .tree-keep-hint {
+  opacity: 1;
 }
 .tree-children {
   display: none;
