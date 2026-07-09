@@ -11,6 +11,8 @@ An AI research companion — Chrome extension + local server. Brainstorm ideas, 
 - **Cross-computer resume** — Session state saved to your Drive folder; pick up where you left off
 - **Runs locally** — No hosting costs, your data stays on your machine
 - **Cloud or local LLMs** — Use a hosted provider (Claude, GPT, Gemini, DeepSeek, GLM, Kimi) or run a model on your own machine via Ollama, LM Studio, or MLX — fully private, no API key needed for local
+- **Scan or keep any document** — One-shot `scan this file` for a single question, or `keep` a file in context across every turn. Bring in the supplement, protocols, or reviewer PDFs alongside your manuscript
+- **Live context meter** — See how much of the model's context window your next request will use, updated as you scan and keep documents
 - **Streaming responses** — Real-time AI chat with streaming
 
 ### 📹 Feature Demo Video
@@ -179,6 +181,8 @@ Ask questions like:
 - "Does my Methods section address the concern about sample size?"
 - "Compare what Reviewer 1 and Reviewer 2 said about the statistical analysis"
 - "Help me rephrase this paragraph to be clearer"
+- "Scan and keep the supplemental material, then review my Figure S18ex legend"
+- "Scan the reviewer PDF — what are the main concerns?"
 
 ---
 
@@ -330,12 +334,60 @@ Run `./start.sh --setup` again, or edit `.env` directly and restart the server.
 
 ---
 
+## Scanning & Keeping Documents
+
+SciKick always has your **manuscript** loaded — the main document it auto-detects in your Drive folder (it picks "main submission" over "supplemental material" when both are present). For everything else — the supplement, a protocol, a reviewer PDF, a contamination report — you decide what to bring into the conversation, and for how long.
+
+### One-shot scan — for a single question
+
+Say `scan this file`, `scan this document`, or `scan <filename>` to pull a file's full text into context **for that one turn only**. Use it for a quick peek:
+
+- "scan this document and review my Figure S18ex legend"
+- "scan the reviewer PDF — what are the main concerns?"
+
+The content is sent to the model for that request and then dropped — follow-up questions won't see it unless you scan again. The parsed text is cached, so re-scanning the same file is instant (no re-download). You can name a file by typing part of its filename; SciKick finds it in your Drive folder.
+
+### Keep — for a whole line of questioning
+
+Say `scan and keep <filename>`, `keep this document loaded`, or `also load <filename>` to keep a file in context **every turn** until you remove it. Use it when you'll ask a series of follow-ups about a file:
+
+- "scan and keep the supplemental material"
+- "keep this document loaded"
+
+Kept files persist across all your subsequent questions. Keep as many as you like — they stay until you remove them or switch projects. The ℹ Info panel lists everything currently kept under 📌 **Loaded Documents**.
+
+Remove a file with:
+- `remove this document` — the file open in your browser tab
+- `remove <filename>` — a specific kept file
+- `clear all loaded documents` — drop everything kept
+
+> **At most one project at a time.** Loading a different Drive folder replaces your context and drops any kept files from the previous project. Within a folder, you can scan and keep any number of files.
+
+### The context meter
+
+The `% free` bar at the bottom estimates **how much of the model's context window the next request will consume** — the actual system prompt plus everything sent that turn (history, retrieved chunks, kept docs, one-shot scans). It mirrors how tools like Claude Code report context.
+
+- A **one-shot scan** raises the bar for that request, then it drops back on your next message (the file isn't resent). This is expected, not a bug.
+- A **kept file** raises the bar and keeps it raised, since it's resent every turn.
+- If you keep a file and then also scan it, it's only counted once (deduplicated by file).
+
+Before your first message of a session the bar shows a rough projection; after the first message it reflects the real request size.
+
+### Notes on extraction
+
+- Text and figure legends are extracted from `.docx`/`.pdf`; **table-cell text is not** (tables in `.docx` are skipped by the parser).
+- Very large files are injected up to ~80k characters per turn; if a file is longer, the tail is truncated and the model will tell you to scan a specific section for content near the end.
+- Kept text is frozen at keep-time. If you edit a kept file on Drive, click **Load Project** (same folder — it preserves your kept list) and re-keep that file to refresh it.
+
+---
+
 ## Tips & Troubleshooting
 
 ### Tips
 
 - **Use a Google Sheet for reviewer comments** — easier to track status and add draft responses
 - **Name figures clearly** — the AI reads captions and surrounding text, so `fig2_main_results.png` gives more context than `IMG_4829.png`
+- **Scan vs. keep** — `scan this file` brings a file in for one question; `scan and keep <file>` keeps it for every follow-up. Use keep when you'll ask a series of questions about a document.
 - **Keep the server running** — it's lightweight and stateless between requests
 - **The memory file is human-readable** — you can inspect or edit `.scikick_memory.json` in your Drive folder
 
