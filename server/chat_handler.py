@@ -255,6 +255,8 @@ You are the chat interface of a desktop application called **scikick**. Understa
 RESUME_PROMPT_EXTENSION = """
 ## Session Resumed
 The researcher is continuing a previous session. Below is a summary of where they left off.
+
+**Kept files do not survive a restart.** Project files the researcher asked to "keep in context" are held in server memory only and are cleared whenever the server restarts — they are NOT restored from this resume summary. The "## Loaded Documents" block in the current message is the sole source of truth for what is loaded right now. If that block lists no files (or says none are kept), then no files are in context, even if the summary below mentions files kept in a prior session. Do not tell the researcher a file is "already loaded" or "already kept" unless it appears in that block — if they ask to scan/keep a file, act on the request rather than claiming it is already loaded.
 """
 
 
@@ -1368,9 +1370,11 @@ def _build_user_message(
     if _loaded_docs:
         parts.append("## Loaded Documents\n")
         parts.append(
-            "These project files were explicitly kept loaded in context. They "
-            "stay available across turns until the user asks to remove them. "
-            "Treat their text as source material alongside the manuscript.\n"
+            "These project files are CURRENTLY kept loaded in context — this "
+            "list is the source of truth for what is loaded right now. They "
+            "stay available across turns until the user asks to remove them or "
+            "the server restarts. Treat their text as source material alongside "
+            "the manuscript.\n"
         )
         cap = _doc_char_budget(0.25)  # kept docs are resent every turn — smaller share
         for d in _loaded_docs:
@@ -1387,6 +1391,18 @@ def _build_user_message(
                 )
             parts.append(f"### Kept File: {d['name']}\n{body}{truncation_note}\n")
             parts.append("---\n")
+    else:
+        # Explicit empty state so the model never infers "already loaded" from
+        # resume memory when in fact nothing is kept (e.g. right after a restart).
+        parts.append("## Loaded Documents\n")
+        parts.append(
+            "No project files are currently kept in context. Kept files live in "
+            "server memory only and are cleared on restart — they are NOT "
+            "restored from session memory. If the resume notes mention files kept "
+            "in a prior session, those are no longer loaded. Do NOT tell the user "
+            "a file is 'already loaded' or 'already kept'; if they ask to scan or "
+            "keep a file, treat it as a fresh request.\n"
+        )
 
     # Web-scraped papers (accumulate separately from Drive context)
     global _scraped_docs, _scraped_sources
