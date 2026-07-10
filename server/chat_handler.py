@@ -225,6 +225,28 @@ def set_project_file_index(files: list[dict], manuscript_file_id: str = "") -> N
         logger.info("Project structure: %d files (%s)", len(_project_structure), breakdown)
 
 
+def get_project_file_counts() -> dict:
+    """Per-category file counts for the loaded project, derived from
+    ``_project_structure``. Returned by the load-context endpoint so the
+    panel can show an accurate folder breakdown on both fresh loads and
+    unchanged re-loads (the structure survives a no-op reload)."""
+    counts = {
+        "total": len(_project_structure),
+        "manuscript": 0,
+        "supplement": 0,
+        "supporting": 0,
+        "reviewer_comments": 0,
+        "miscellaneous": 0,
+    }
+    for f in _project_structure:
+        t = f.get("type")
+        if t == "reviewer_comment":
+            counts["reviewer_comments"] += 1
+        elif t in counts:
+            counts[t] += 1
+    return counts
+
+
 def set_project_context(
     doc: PaperDocument,
     comments: list[ReviewerComment],

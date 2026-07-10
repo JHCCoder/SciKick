@@ -583,6 +583,7 @@ async def load_context(folder_id: str, force: bool = False):
         set_project_file_index,
         set_project_docs,
         set_project_summary,
+        get_project_file_counts,
         _current_doc,
         _current_comments,
         _current_doc_source,
@@ -675,6 +676,7 @@ async def load_context(folder_id: str, force: bool = False):
             "files_changed": 0,
             "files_skipped": len(all_files),
             "summary": _project_summary,
+            "file_counts": get_project_file_counts(),
         }
 
     if force:
@@ -911,6 +913,7 @@ async def load_context(folder_id: str, force: bool = False):
         "comment_files_processed": [cf["name"] for cf in changed_comment_files],
         "comment_files_skipped": [cf["name"] for cf in skipped_comment_files],
         "summary": summary_text,
+        "file_counts": get_project_file_counts(),
         "parsed_files": {
             "manuscript": 1,
             "comments": len(comment_files),

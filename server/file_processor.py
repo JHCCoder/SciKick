@@ -106,6 +106,18 @@ def parse_pdf(content: bytes, filename: str) -> PaperDocument:
 # DOCX processing
 # ---------------------------------------------------------------------------
 
+# A figure-caption paragraph: an optional "Supplementary"/"Suppl." prefix,
+# then "Figure"/"Fig."/"Fig", a label like "1", "S1", or "S18ex", and a
+# delimiter (period/colon/dash/paren). The delimiter weeds out mid-sentence
+# references such as "Figure 1 shows..." so we count real captions, not
+# in-text mentions. DOCX has no reliable embedded-image→caption link, so we
+# key figures by their caption label instead of by image blob.
+_FIGURE_CAPTION_RE = re.compile(
+    r"^\s*(?:Supplementary\s+|Suppl\.?\s+|Supp\.?\s+)?"
+    r"(?:Figure|Fig\.?)\s+((?:S)?\d+[a-zA-Z]*)\s*[.:)\-–—]",
+    re.IGNORECASE,
+)
+
 
 def parse_docx(content: bytes, filename: str) -> PaperDocument:
     """Extract text from a .docx file, including table cell text.
@@ -163,10 +175,23 @@ def parse_docx(content: bytes, filename: str) -> PaperDocument:
     full_text_parts = []
     n_paragraphs = 0
     n_tables = 0
+    seen_fig_labels: set[str] = set()
+    all_figures: list[FigureInfo] = []
     for block in iter_block_items(docx):
         if isinstance(block, Paragraph):
-            full_text_parts.append(block.text)
+            text = block.text
+            full_text_parts.append(text)
             n_paragraphs += 1
+            # Detect figure-caption paragraphs (deduped by label).
+            m = _FIGURE_CAPTION_RE.match(text)
+            if m:
+                label = f"Figure {m.group(1)}"
+                key = label.lower()
+                if key not in seen_fig_labels:
+                    seen_fig_labels.add(key)
+                    all_figures.append(
+                        FigureInfo(filename=label, caption=text.strip())
+                    )
         elif isinstance(block, Table):
             rendered = table_to_text(block)
             if rendered:
@@ -174,11 +199,12 @@ def parse_docx(content: bytes, filename: str) -> PaperDocument:
                 n_tables += 1
 
     doc.full_text = "\n\n".join(full_text_parts)
+    doc.figures = all_figures
     doc.sections = _parse_sections(doc.full_text)
     doc.title, doc.abstract, doc.authors = _extract_metadata(doc.full_text)
 
-    logger.info("Parsed DOCX '%s': %d paragraphs, %d tables, %d sections",
-                 filename, n_paragraphs, n_tables, len(doc.sections))
+    logger.info("Parsed DOCX '%s': %d paragraphs, %d tables, %d sections, %d figures",
+                 filename, n_paragraphs, n_tables, len(doc.sections), len(all_figures))
     return doc
 
 

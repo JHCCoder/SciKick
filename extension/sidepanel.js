@@ -523,30 +523,35 @@ async function loadProject() {
 
     // Download and process the manuscript + reviewer comments from Drive
     showSystemMessage("📥 Downloading and processing manuscript...");
+    let manuscriptLoaded = false;
     try {
       const loadRes = await fetch(`${SERVER_URL}/drive/folder/${folderId}/load-context`, {
         method: "POST",
       });
       if (loadRes.ok) {
         const loadData = await loadRes.json();
-        // Best-effort: surface the load-time project summary and parsed-file
-        // breakdown when present. Guarded so an older server (no summary field)
+        // Best-effort: surface the folder breakdown, project summary, and
+        // manuscript status. Guarded so an older server (missing fields)
         // can't break the load path.
+        const fc = loadData.file_counts || {};
+        const fcParts = [];
+        if (fc.total != null) fcParts.push(`${fc.total} total`);
+        if (fc.supplement) fcParts.push(`${fc.supplement} supplemental`);
+        if (fc.supporting) fcParts.push(`${fc.supporting} supporting`);
+        if (fc.reviewer_comments) {
+          fcParts.push(`${fc.reviewer_comments} reviewer comment${fc.reviewer_comments > 1 ? "s" : ""}`);
+        }
+        if (fc.miscellaneous) fcParts.push(`${fc.miscellaneous} miscellaneous`);
+        const fcLine = fcParts.length ? `📊 **Files in project**: ${fcParts.join(" · ")}\n\n` : "";
         const summaryLine = loadData.summary ? `📝 **Project summary**: ${loadData.summary}\n\n` : "";
-        const pf = loadData.parsed_files || {};
-        const pfParts = [];
-        if (pf.supplement) pfParts.push(`${pf.supplement} supplement`);
-        if (pf.supporting) pfParts.push(`${pf.supporting} supporting`);
-        if (pf.miscellaneous) pfParts.push(`${pf.miscellaneous} misc`);
-        const pfLine = pfParts.length ? `\nParsed files: ${pfParts.join(", ")}` : "";
         showSystemMessage(
+          fcLine +
           summaryLine +
           `📄 **Manuscript loaded**: ${loadData.manuscript.title || loadData.manuscript.name}\n` +
           `Sections: ${loadData.manuscript.sections.join(", ")}\n` +
-          `Figures found: ${loadData.manuscript.figures.length}\n` +
-          `Files in project: ${loadData.comments.count || 0}` +
-          pfLine
+          `Figures found: ${loadData.manuscript.figures.length}`
         );
+        manuscriptLoaded = true;
       } else {
         const err = await loadRes.json().catch(() => ({ detail: "Failed to load context" }));
         showSystemMessage(`⚠️ Could not auto-detect manuscript: ${err.detail}\n\nYou can still chat, but you'll need to paste your paper text directly.`);
@@ -555,28 +560,23 @@ async function loadProject() {
       showSystemMessage(`⚠️ Context loading warning: ${e.message}`);
     }
 
-    // Verify what was loaded into the chat context (informational — guard
-    // every field so an unexpected payload can't abort loadProject's success
-    // path with a misleading error).
+    // Best-effort context verification — used only to set the project-name
+    // header. The folder breakdown, summary, and manuscript details are
+    // already shown in the bubble above, so we don't repeat them here.
     try {
       const ctxRes = await fetch(`${SERVER_URL}/chat/context`);
       const ctxData = ctxRes.ok ? await ctxRes.json().catch(() => null) : null;
-
       if (ctxData && ctxData.loaded && ctxData.paper) {
-        const paper = ctxData.paper;
-        const sections = Array.isArray(paper.sections) ? paper.sections : [];
-        const figures = Array.isArray(paper.figures) ? paper.figures : [];
-        showSystemMessage(
-          `✅ **Ready**\n\n` +
-          `Paper: ${paper.title || "Untitled"}\n` +
-          `Sections: ${sections.join(", ")}\n` +
-          `Figures: ${figures.length}\n\n` +
-          `You can now ask me anything about your project.`
-        );
-        dom.projectName.textContent = paper.title || folder_name;
+        dom.projectName.textContent = ctxData.paper.title || folder_name;
       }
     } catch (e) {
       // Non-fatal — context verification only.
+    }
+
+    if (manuscriptLoaded) {
+      showSystemMessage(
+        "✅ **Ready.** I've got the lay of the land — ask me general questions about your project, or scan the document you're working on for more in-depth assistance."
+      );
     }
 
     projectLoaded = true;
