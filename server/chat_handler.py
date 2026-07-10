@@ -26,7 +26,10 @@ from context_engine import (
     retrieve_context,
 )
 from memory_manager import (
+    GoalState,
     build_resume_context,
+    goal_block,
+    goal_recap_text,
     get_current_memory,
     update_memory_after_chat,
     _save_local,
@@ -112,6 +115,25 @@ _awaiting_doc_choice: bool = False
 # /unload-project.
 _awaiting_scan_confirmation: bool = False
 _scan_preference: str = ""  # "" | "yes" | "no"
+
+# --- Project goal onboarding -------------------------------------------------
+# The user's chosen goal/mode for the loaded project is persisted in
+# memory.goal (GoalState). The first time a project is loaded with no goal —
+# or after a "change goal" command — this state machine walks the user through
+# mode-specific questions, capturing free-text answers here before finalizing
+# them into memory.goal. Mode + subtype are button-chosen via POST /chat/goal;
+# the remaining free-text field is asked as an assistant message and the
+# user's reply is captured here (bypassing the LLM), the same intercept
+# pattern used for _awaiting_doc_choice / _awaiting_scan_confirmation.
+_goal_onboarding: bool = False  # pipeline active (between mode pick and finalize)
+_awaiting_goal_field: str = ""  # journal | grant_details | target | freeform
+_pending_goal: Optional[GoalState] = None  # accumulates answers until finalize
+
+# Phrases that re-trigger the goal pipeline (clears the saved goal first).
+_CHANGE_GOAL_PHRASES = (
+    "change goal", "change the goal", "new goal", "switch goal",
+    "change mode", "switch mode", "reset goal",
+)
 
 # Loaded documents — project files the user explicitly asked to "keep" in
 # context across turns (e.g. "scan and keep the supplement"). Each entry is
@@ -490,6 +512,14 @@ def _build_system_prompt() -> str:
     # project is about before any retrieval.
     if _project_summary:
         prompt += f"\n\n## Project Summary\n{_project_summary}\n"
+
+    # The user's persisted project goal/mode (chosen on first load). When set
+    # this is the source of truth for the session's purpose and supersedes the
+    # per-message "session focus" hint. Built from memory.goal so it reflects
+    # the saved goal on every turn (including across restarts).
+    memory = get_current_memory()
+    if memory and memory.goal and memory.goal.mode:
+        prompt += "\n\n" + goal_block(memory.goal)
 
     # Classified project structure — a metadata overview of every file in the
     # loaded Drive folder (names + types only). Tells the model what's in the
@@ -1427,6 +1457,308 @@ def _is_negative(message: str) -> bool:
     return any(t in m for t in _NO_TOKENS)
 
 
+# ---------------------------------------------------------------------------
+# Project goal onboarding helpers
+# ---------------------------------------------------------------------------
+
+
+def _is_change_goal(low_message: str) -> bool:
+    return any(p in low_message for p in _CHANGE_GOAL_PHRASES)
+
+
+def _fire_and_forget(coro) -> None:
+    """Schedule a coroutine on the running loop without awaiting it.
+
+    Best-effort side effects (Drive sync, journal lookup) after a goal change.
+    If there is no running event loop (e.g. unit tests calling the sync helpers
+    directly), the coroutine is closed cleanly instead of leaking a
+    "coroutine was never awaited" warning.
+    """
+    try:
+        asyncio.create_task(coro)
+    except RuntimeError:
+        coro.close()
+
+
+def _has_goal() -> bool:
+    memory = get_current_memory()
+    return bool(memory and memory.goal and memory.goal.mode)
+
+
+# Free-text question for each (mode, subtype) — the field the answer fills.
+def _goal_first_question(mode: str, subtype: str = "") -> tuple[str, str]:
+    """Return (question_text, field_to_await) for the start of onboarding.
+
+    field_to_await is "" when no free-text question is needed (the mode
+    finalizes immediately, e.g. brainstorming).
+    """
+    if mode in ("paper_revision", "paper_writing"):
+        return (
+            "Which journal are you targeting for this paper? "
+            "(e.g. Nature, Cell, NEJM — or 'skip' if you haven't decided yet)",
+            "journal",
+        )
+    if mode == "grant":
+        gt = subtype or "this"
+        return (
+            f"Got it — a {gt} grant. Is there anything specific I should know "
+            "(funding mechanism / program, specific aims, deadline)? Type a note, "
+            "or 'skip'.",
+            "grant_details",
+        )
+    if mode == "application":
+        if subtype == "other_professional" or not subtype:
+            return (
+                "Tell me briefly about this application — what it's for and who "
+                "it's for (e.g. residency, fellowship, scholarship).",
+                "freeform",
+            )
+        labels = {
+            "job": "company or role",
+            "med_school": "medical school",
+            "grad_school": "graduate program or school",
+        }
+        whom = labels.get(subtype, "target")
+        return (f"Which {whom} are you targeting?", "target")
+    # brainstorming / paper_discussion / other → no questions
+    return "", ""
+
+
+async def _start_goal_onboarding(mode: str, subtype: str = "") -> dict:
+    """Begin onboarding for a mode (called by POST /chat/goal).
+
+    Returns {"question", "field"} when a free-text answer is needed, or
+    {"recap"} when the mode needs no questions and is finalized immediately.
+    """
+    global _goal_onboarding, _awaiting_goal_field, _pending_goal
+    _pending_goal = GoalState(mode=mode)
+    if mode == "grant":
+        _pending_goal.grant_type = subtype or "other"
+    elif mode == "application":
+        _pending_goal.application_type = subtype or "other_professional"
+
+    question, field = _goal_first_question(mode, subtype)
+    if not field:
+        # No free-text step — finalize right away.
+        recap = await _finalize_goal()
+        return {"recap": recap}
+
+    _goal_onboarding = True
+    _awaiting_goal_field = field
+    return {"question": question, "field": field}
+
+
+async def _advance_goal(message: str) -> Optional[dict]:
+    """Capture the user's reply into the awaited field (does NOT finalize).
+
+    Returns {"captured": True} when a field was captured, or None if nothing
+    was awaited. Finalization (persist + reference lookup + recap) is done by
+    the caller via _finalize_goal / _goal_finalize_stream, so the lookup can
+    stream an interim "Looking up…" message instead of blocking silently.
+    """
+    global _awaiting_goal_field
+    field = _awaiting_goal_field
+    if not field or _pending_goal is None:
+        return None
+
+    msg = (message or "").strip()
+    skip = msg.lower() in ("skip", "none", "no", "n/a", "na", "nothing", "")
+
+    if field == "journal":
+        if not skip:
+            _pending_goal.journal = msg[:200]
+    elif field == "grant_details":
+        if not skip:
+            _pending_goal.grant_details = msg[:500]
+    elif field == "target":
+        if not skip:
+            _pending_goal.target = msg[:200]
+    elif field == "freeform":
+        _pending_goal.freeform = msg[:500]
+
+    _awaiting_goal_field = ""
+    return {"captured": True}
+
+
+async def _sync_goal_to_drive(memory) -> None:
+    """Best-effort Drive sync of the current memory (used after goal changes)."""
+    try:
+        if not memory.project_folder_id:
+            return
+        from drive_sync import _save_memory_to_drive
+
+        await _save_memory_to_drive(memory.project_folder_id, memory.model_dump())
+    except Exception as exc:
+        logger.warning("Goal Drive sync failed (non-fatal): %s", exc)
+
+
+def _goal_lookup_kind_name(goal: GoalState) -> Optional[tuple[str, str]]:
+    """Return (kind, name) to look up for this goal, or None if no lookup
+    applies (brainstorming / paper_discussion / other, or a missing target)."""
+    if goal.mode in ("paper_revision", "paper_writing") and goal.journal:
+        return "journal", goal.journal
+    if goal.mode == "application" and (goal.target or goal.freeform):
+        return "program", (goal.target or goal.freeform)
+    if goal.mode == "grant" and goal.grant_type:
+        name = goal.grant_type
+        if goal.grant_details:
+            name = f"{goal.grant_type} ({goal.grant_details})"
+        return "grant", name
+    return None
+
+
+async def _lookup_and_store_context(goal: GoalState) -> None:
+    """Best-effort reference lookup for the goal's target, stored into the goal.
+
+    Picks the lookup kind by mode (journal / program / grant) and stores notes
+    + ok + source URL into the goal's fields. The caller (_finalize_goal)
+    persists and syncs after. Never raises.
+    """
+    kn = _goal_lookup_kind_name(goal)
+    if not kn:
+        return
+    kind, name = kn
+    if goal.mode in ("paper_revision", "paper_writing"):
+        set_fields = ("journal_formatting", "journal_lookup_ok", "journal_source_url")
+    else:
+        set_fields = ("target_info", "target_info_ok", "target_info_url")
+
+    try:
+        from memory_digest import fetch_context_info
+
+        note, ok, url = await fetch_context_info(kind, name)
+    except Exception as exc:
+        logger.warning("Context lookup failed (non-fatal): %s", exc)
+        return
+
+    setattr(goal, set_fields[0], note)
+    setattr(goal, set_fields[1], ok)
+    setattr(goal, set_fields[2], url)
+    logger.info(
+        "Context lookup (%s) for '%s' (ok=%s, %d chars, url=%s)",
+        kind, name, ok, len(note), url or "(none)",
+    )
+
+
+async def _finalize_goal() -> str:
+    """Persist _pending_goal into memory.goal and return the user-facing recap.
+
+    For modes with a target (journal / program / grant), the reference lookup
+    is awaited (capped at ~60s — one LLM call, bounded by model latency)
+    BEFORE building the recap, so the recap can cite the source URL. On
+    timeout/failure the recap falls back to a "couldn't fetch" note and the
+    model uses its own knowledge. Callers that stream (the /chat/send capture
+    path) show an interim "Looking up…" message first via _goal_finalize_stream.
+    """
+    global _goal_onboarding, _awaiting_goal_field, _pending_goal
+    memory = get_current_memory()
+    if memory is None or _pending_goal is None:
+        _goal_onboarding = False
+        _awaiting_goal_field = ""
+        _pending_goal = None
+        return "Goal saved."
+
+    g = _pending_goal
+    g.created = datetime.now(timezone.utc).isoformat()
+    memory.goal = g
+
+    # Awaited reference lookup so the recap can name the source URL. Best-effort
+    # with a generous timeout (one LLM call; no network scraping).
+    try:
+        await asyncio.wait_for(_lookup_and_store_context(g), timeout=60)
+    except asyncio.TimeoutError:
+        logger.info("Context lookup timed out at finalize for '%s'", g.mode)
+    except Exception as exc:
+        logger.warning("Context lookup failed at finalize: %s", exc)
+
+    _save_local(memory)
+    recap = goal_recap_text(memory.goal)
+
+    # Best-effort, non-blocking Drive sync.
+    _fire_and_forget(_sync_goal_to_drive(memory))
+
+    _goal_onboarding = False
+    _awaiting_goal_field = ""
+    _pending_goal = None
+    return recap
+
+
+async def _goal_finalize_stream():
+    """Stream the goal finalization as SSE so the user sees an interim
+    "Looking up…" message while the (potentially slow) reference LLM lookup
+    runs, then the final recap. Emits the recap with replace=true so it
+    replaces (not appends to) the interim line in the assistant bubble.
+    """
+    g = _pending_goal
+    kn = _goal_lookup_kind_name(g) if g else None
+    if kn:
+        kind, name = kn
+        label = {"journal": "formatting guidelines", "program": "program info",
+                 "grant": "grant info"}.get(kind, "info")
+        yield f"data: {json.dumps({'type': 'text', 'content': f'Looking up {label} for {name}…'})}\n\n"
+    recap = await _finalize_goal()
+    # replace=true → the panel resets the bubble to just the recap (the interim
+    # "Looking up…" line was transient).
+    yield f"data: {json.dumps({'type': 'text', 'content': recap, 'replace': True})}\n\n"
+    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+
+def _reset_goal_for_change() -> None:
+    """Clear the saved goal and re-arm onboarding (for "change goal")."""
+    global _goal_onboarding, _awaiting_goal_field, _pending_goal
+    memory = get_current_memory()
+    if memory is not None:
+        memory.goal = None
+        _save_local(memory)
+        _fire_and_forget(_sync_goal_to_drive(memory))
+    _goal_onboarding = True
+    _awaiting_goal_field = ""
+    _pending_goal = None
+
+
+async def _handle_goal_intercept(message: str) -> Optional[dict]:
+    """If this message is a goal-onboarding turn, handle it and return a dict
+    {"text": str, "show_buttons": bool} to emit as the response (bypassing the
+    LLM). Returns None for normal messages.
+
+    Requires an active memory (a loaded project); without one, goal commands
+    are passed through to the LLM unchanged.
+    """
+    if get_current_memory() is None:
+        return None
+
+    low = (message or "").strip().lower()
+    if _is_change_goal(low):
+        _reset_goal_for_change()
+        return {
+            "text": (
+                "Sure — let's set a new goal for this project. "
+                "What would you like to work on?"
+            ),
+            "show_buttons": True,
+        }
+
+    if _goal_onboarding and _awaiting_goal_field:
+        result = await _advance_goal(message)
+        if result and result.get("captured"):
+            # Finalize via a streaming generator so the lookup can show an
+            # interim "Looking up…" message (it may take 10-30s).
+            return {"finalize_stream": True}
+        return None
+
+    return None
+
+
+async def _single_message_stream(text: str, show_buttons: bool = False):
+    """Emit one assistant message as an SSE stream (text + optional
+    goal_buttons signal + done), so the onboarding intercept works with the
+    existing streaming consumer in the side panel."""
+    yield f"data: {json.dumps({'type': 'text', 'content': text})}\n\n"
+    if show_buttons:
+        yield f"data: {json.dumps({'type': 'goal_buttons'})}\n\n"
+    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+
 def _build_user_message(
     message: str,
     include_paper: bool = True,
@@ -1443,8 +1775,10 @@ def _build_user_message(
 
     parts = []
 
-    # Session focus — the user's chosen area of work for this session
-    if session_focus:
+    # Session focus — the user's chosen area of work for this session.
+    # Skipped when a persisted project goal is set (the goal's ## Project Goal
+    # block in the system prompt already covers this, richer and durable).
+    if session_focus and not _has_goal():
         focus_descriptions = {
             "brainstorming": "The user wants to brainstorm — explore ideas, develop hypotheses, and think creatively. Be expansive and generative.",
             "paper_discussion": "The user wants to discuss their paper — think through results, implications, and narrative. Be analytical and critical.",
@@ -1946,6 +2280,27 @@ async def send_message(req: ChatRequest):
     """Send a message to the revision assistant (streaming SSE)."""
     provider = _get_provider()
 
+    # Goal onboarding intercept — a "change goal" command, a pending
+    # onboarding answer, or a just-captured answer that needs a streamed
+    # finalization (interim "Looking up…" + recap). Handled without the LLM.
+    goal_evt = await _handle_goal_intercept(req.message)
+    if goal_evt is not None:
+        if goal_evt.get("finalize_stream"):
+            stream = _goal_finalize_stream()
+        else:
+            stream = _single_message_stream(
+                goal_evt["text"], goal_evt.get("show_buttons", False)
+            )
+        return StreamingResponse(
+            stream,
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     # Decide what document content to inject: resolve a pending "which
     # document?" reply, or classify this message's scan intent.
     (
@@ -2019,6 +2374,30 @@ async def send_message(req: ChatRequest):
 async def send_message_sync(req: ChatRequest):
     """Send a message and get a complete (non-streaming) response."""
     provider = _get_provider()
+
+    # Goal onboarding intercept (see send_message). The streaming /send path
+    # is the primary entry; /send-sync just awaits the full finalization.
+    goal_evt = await _handle_goal_intercept(req.message)
+    if goal_evt is not None:
+        if goal_evt.get("finalize_stream"):
+            recap = await _finalize_goal()
+            return {
+                "response": recap,
+                "context_used": {
+                    "provider": provider["provider"],
+                    "model": provider["model"],
+                    "goal_intercept": True,
+                },
+            }
+        return {
+            "response": goal_evt["text"],
+            "goal_buttons": goal_evt.get("show_buttons", False),
+            "context_used": {
+                "provider": provider["provider"],
+                "model": provider["model"],
+                "goal_intercept": True,
+            },
+        }
 
     # Decide what document content to inject: resolve a pending "which
     # document?" reply, or classify this message's scan intent.
@@ -2124,6 +2503,46 @@ async def configure_llm(req: ConfigureRequest):
             "configured": True,
         },
     }
+
+
+class GoalRequest(BaseModel):
+    mode: str  # paper_revision | paper_writing | application | grant | brainstorming | paper_discussion | other
+    subtype: str = ""  # grant_type (NIH/NSF/...) or application_type (job/med_school/grad_school/other_professional)
+
+
+@router.post("/goal")
+async def set_goal(req: GoalRequest):
+    """Start (or restart) the project-goal onboarding for the loaded project.
+
+    The mode (+ optional subtype, button-chosen) is stored into the pending
+    goal; the first free-text question is returned for the panel to show as an
+    assistant message. Modes with no free-text step finalize immediately and
+    return the recap. Requires an active memory (a loaded project).
+    """
+    if get_current_memory() is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Load a project first — the goal is saved per project.",
+        )
+
+    mode = (req.mode or "").strip()
+    if mode not in (
+        "paper_revision", "paper_writing", "application", "grant",
+        "brainstorming", "paper_discussion", "other",
+    ):
+        raise HTTPException(status_code=400, detail=f"Unknown goal mode: {mode!r}")
+
+    result = await _start_goal_onboarding(mode, (req.subtype or "").strip())
+    if result.get("recap") is not None:
+        return {"done": True, "recap": result["recap"], "goal": _goal_payload()}
+    return {"done": False, "question": result["question"], "goal": _goal_payload()}
+
+
+def _goal_payload() -> Optional[dict]:
+    """Return the current saved goal as a dict (or None) for API responses."""
+    from memory_manager import goal_payload
+
+    return goal_payload()
 
 
 @router.get("/providers")
@@ -2427,6 +2846,9 @@ async def refresh_context():
         _awaiting_doc_choice = False
         _awaiting_scan_confirmation = False
         _scan_preference = ""
+        _goal_onboarding = False
+        _awaiting_goal_field = ""
+        _pending_goal = None
         # The last-request token measurement is now stale (the state it
         # measured is gone). Reset it so context_usage() falls back to the
         # standing projection — which recomputes from the cleared state and
@@ -2570,6 +2992,7 @@ async def reset_all_state():
     global _loaded_docs
     global _last_turn_scan_chars
     global _last_request_tokens, _last_request_system_tokens, _last_request_user_tokens
+    global _goal_onboarding, _awaiting_goal_field, _pending_goal
 
     from memory_manager import (
         get_current_memory,
@@ -2613,6 +3036,9 @@ async def reset_all_state():
         _awaiting_doc_choice = False
         _awaiting_scan_confirmation = False
         _scan_preference = ""
+        _goal_onboarding = False
+        _awaiting_goal_field = ""
+        _pending_goal = None
         _current_doc_file_id = ""
         _current_doc_file_name = ""
         _loaded_docs = []
@@ -2651,6 +3077,7 @@ async def unload_project():
     global _loaded_docs
     global _last_turn_scan_chars
     global _last_request_tokens, _last_request_system_tokens, _last_request_user_tokens
+    global _goal_onboarding, _awaiting_goal_field, _pending_goal
 
     from memory_manager import (
         get_current_memory,
@@ -2689,6 +3116,9 @@ async def unload_project():
         _awaiting_doc_choice = False
         _awaiting_scan_confirmation = False
         _scan_preference = ""
+        _goal_onboarding = False
+        _awaiting_goal_field = ""
+        _pending_goal = None
         _current_doc_file_id = ""
         _current_doc_file_name = ""
         _loaded_docs = []

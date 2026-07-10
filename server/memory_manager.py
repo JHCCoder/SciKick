@@ -53,6 +53,35 @@ class ChatTurn(BaseModel):
     timestamp: str = ""
 
 
+class GoalState(BaseModel):
+    """The user's chosen goal/mode for a project, set on first load (or after a
+    "change goal" command) and persisted so the AI knows the project's purpose
+    on every subsequent load. Mode-specific fields are filled by the onboarding
+    Q&A; only the ones relevant to the chosen mode are populated.
+    """
+
+    mode: str = ""  # paper_revision | paper_writing | application | grant |
+    #               # brainstorming | paper_discussion | other
+    created: str = ""
+    # Paper modes — target journal + best-effort fetched formatting notes.
+    journal: str = ""
+    journal_formatting: str = ""  # distilled author-guidelines summary
+    journal_lookup_ok: bool = False
+    journal_source_url: str = ""  # URL the formatting notes were fetched from
+    # Grant mode
+    grant_type: str = ""  # NIH | NSF | ERC | foundation | industry | other
+    grant_details: str = ""
+    # Application mode
+    application_type: str = ""  # job | med_school | grad_school | other_professional
+    target: str = ""  # school / company / program name
+    freeform: str = ""  # extra notes / "other" description
+    # Fetched reference info + source URL for application (program) and grant
+    # modes (mirrors journal_formatting/journal_source_url for paper modes).
+    target_info: str = ""
+    target_info_ok: bool = False
+    target_info_url: str = ""
+
+
 class RevisionMemory(BaseModel):
     project_id: str = ""
     project_folder_id: str = ""  # Google Drive folder ID
@@ -68,6 +97,7 @@ class RevisionMemory(BaseModel):
     chat_history: list[ChatTurn] = []
     active_context: str = ""  # what the agent should know on resume
     file_snapshots: dict[str, str] = {}  # file_id -> Drive modifiedTime, for change detection
+    goal: Optional[GoalState] = None  # persisted project goal/mode + onboarding answers
 
 
 # ---------------------------------------------------------------------------
@@ -382,6 +412,169 @@ def update_paper_sections(sections: list[dict]) -> None:
     _save_local(memory)
 
 
+_GOAL_MODE_LABELS = {
+    "paper_revision": "Paper revision",
+    "paper_writing": "Paper writing",
+    "application": "Application",
+    "grant": "Grant",
+    "brainstorming": "Brainstorming",
+    "paper_discussion": "Paper discussion",
+    "other": "Other",
+}
+
+_GRANT_TYPE_LABELS = {
+    "NIH": "NIH", "NSF": "NSF", "ERC": "ERC",
+    "foundation": "Foundation", "industry": "Industry", "other": "Other",
+}
+
+_APP_TYPE_LABELS = {
+    "job": "Job application",
+    "med_school": "Medical school",
+    "grad_school": "Grad school / PhD",
+    "other_professional": "Other professional application",
+}
+
+
+def goal_block(goal: "GoalState") -> str:
+    """Render a GoalState as a markdown block for the system prompt / resume
+    context. Shows the mode and every populated mode-specific field, plus a
+    directive to tailor all advice to the goal. Used both in the system prompt
+    (every turn) and in the resume context, so the rendering stays consistent.
+    """
+    label = _GOAL_MODE_LABELS.get(goal.mode, goal.mode or "Unspecified")
+    lines = [f"## Project Goal", f"Mode: **{label}**"]
+
+    if goal.mode in ("paper_revision", "paper_writing"):
+        if goal.journal:
+            lines.append(f"Target journal: **{goal.journal}**")
+        if goal.journal_formatting:
+            lines.append("")
+            lines.append("Author-guidelines notes (formatting):")
+            lines.append(goal.journal_formatting)
+        directive = (
+            f"Tailor all revision/writing advice to {goal.journal or 'the target journal'}'s "
+            "formatting conventions. If the notes above are empty or you are unsure of a "
+            "specific rule, rely on your general knowledge of that journal's style, and ask "
+            "the user to paste the author guidelines if precision matters."
+        )
+    elif goal.mode == "grant":
+        if goal.grant_type:
+            lines.append(
+                f"Grant type: **{_GRANT_TYPE_LABELS.get(goal.grant_type, goal.grant_type)}**"
+            )
+        if goal.grant_details:
+            lines.append(f"Grant details: {goal.grant_details}")
+        if goal.target_info:
+            lines.append("")
+            lines.append("Grant-program notes (looked up):")
+            lines.append(goal.target_info)
+        directive = (
+            "Tailor all advice to this grant's aims, review criteria, and structure "
+            "(specific aims, significance, innovation, approach, etc. as applicable)."
+        )
+    elif goal.mode == "application":
+        if goal.application_type:
+            lines.append(
+                f"Application type: **{_APP_TYPE_LABELS.get(goal.application_type, goal.application_type)}**"
+            )
+        if goal.target:
+            lines.append(f"Target: **{goal.target}**")
+        if goal.freeform:
+            lines.append(f"Notes: {goal.freeform}")
+        if goal.target_info:
+            lines.append("")
+            lines.append("Program/target notes (looked up):")
+            lines.append(goal.target_info)
+        directive = (
+            "Tailor all advice to this application's expectations and audience "
+            "(statement of purpose, activities, fit with the target, etc.)."
+        )
+    else:
+        if goal.freeform:
+            lines.append(f"Notes: {goal.freeform}")
+        directive = "Follow the user's lead on what they need."
+
+    lines.append("")
+    lines.append(directive)
+    return "\n".join(lines) + "\n"
+
+
+def goal_payload() -> Optional[dict]:
+    """Return the current saved goal as a dict for API responses, or None.
+
+    Includes a prebuilt ``recap`` string so the side panel can display the
+    goal summary without re-deriving it client-side.
+    """
+    memory = get_current_memory()
+    if not (memory and memory.goal and memory.goal.mode):
+        return None
+    g = memory.goal
+    return {**g.model_dump(), "recap": goal_recap_text(g)}
+
+
+def goal_recap_text(goal: "GoalState") -> str:
+    """Short user-facing recap of the saved goal, shown at finalize time and on
+    subsequent project loads. Ends with the "say change goal" correction hint.
+    """
+    label = _GOAL_MODE_LABELS.get(goal.mode, goal.mode or "Unspecified")
+    bits = [f"**Goal:** {label}"]
+    if goal.mode in ("paper_revision", "paper_writing"):
+        if goal.journal:
+            bits.append(f"targeting **{goal.journal}**")
+        if goal.journal_lookup_ok and goal.journal_source_url:
+            bits.append(
+                f"— these formatting notes come from my training knowledge of "
+                f"{goal.journal}, not a live read of its guidelines "
+                f"(canonical guidelines page: {goal.journal_source_url}). "
+                f"If you need the exact/detailed rules, open that page in a tab "
+                f"and click **Scrape this page** to pull the real guidelines "
+                f"into context"
+            )
+        elif goal.journal_lookup_ok and goal.journal_formatting:
+            bits.append(
+                "— these formatting notes come from my training knowledge of "
+                "this journal, not a live read of its guidelines; for exact "
+                "rules, scrape its author-guidelines page into context"
+            )
+        elif goal.journal:
+            bits.append(
+                "— I couldn't look up specific formatting notes, so I'll use "
+                "my general training knowledge of this journal's style"
+            )
+    elif goal.mode == "grant":
+        if goal.grant_type:
+            bits.append(f"{_GRANT_TYPE_LABELS.get(goal.grant_type, goal.grant_type)} grant")
+        if goal.grant_details:
+            bits.append("— specifics noted")
+        if goal.target_info_ok and goal.target_info_url:
+            bits.append(
+                f"— grant-program info fetched from {goal.target_info_url}"
+            )
+        elif goal.target_info_ok and goal.target_info:
+            bits.append("— grant-program info loaded")
+    elif goal.mode == "application":
+        if goal.application_type:
+            bits.append(_APP_TYPE_LABELS.get(goal.application_type, goal.application_type))
+        if goal.target:
+            bits.append(f"→ **{goal.target}**")
+        if goal.freeform:
+            bits.append(f"({goal.freeform})")
+        if goal.target_info_ok and goal.target_info_url:
+            bits.append(
+                f"— program info fetched from {goal.target_info_url}"
+            )
+        elif goal.target_info_ok and goal.target_info:
+            bits.append("— program info loaded")
+    elif goal.freeform:
+        bits.append(goal.freeform)
+
+    return (
+        "Got it — " + " ".join(bits) + ". "
+        "I'll keep this in mind for every conversation on this project. "
+        'If any of this is wrong, just say **"change goal"**.'
+    )
+
+
 def build_resume_context() -> str:
     """Build a context string for the Claude system prompt on resume."""
     memory = get_current_memory()
@@ -394,6 +587,9 @@ def build_resume_context() -> str:
         f"Project: {memory.project_folder_name}\n"
         f"Last active: {memory.last_updated} on {memory.last_computer}\n"
     )
+
+    if memory.goal and memory.goal.mode:
+        parts.append(goal_block(memory.goal))
 
     if memory.conversation_summary:
         parts.append(f"\n### Previous Context\n{memory.conversation_summary}\n")

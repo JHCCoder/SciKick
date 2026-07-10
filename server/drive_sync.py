@@ -601,6 +601,7 @@ async def load_context(folder_id: str, force: bool = False):
         create_fresh_memory,
         set_current_memory,
         _save_local,
+        goal_payload,
     )
 
     memory = get_current_memory()
@@ -896,6 +897,7 @@ async def load_context(folder_id: str, force: bool = False):
         "status": "loaded",
         "files_changed": len(changed_ids) + len(new_ids),
         "files_skipped": len(unchanged_ids),
+        "goal": goal_payload(),
         "manuscript": {
             "name": name,
             "title": doc.title,
@@ -1195,6 +1197,7 @@ async def resume_project(folder_id: str):
             ChatTurn,
             set_current_memory,
             _save_local,
+            goal_payload,
         )
 
         try:
@@ -1219,6 +1222,7 @@ async def resume_project(folder_id: str):
                 "chat_turns": len(memory.chat_history) // 2,
                 "decisions_count": len(memory.decisions),
                 "conversation_summary": memory.conversation_summary[:500],
+                "goal": goal_payload(),
             }
 
             logger.info(

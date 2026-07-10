@@ -170,6 +170,199 @@ async def generate_project_summary(
     return text
 
 
+# ---------------------------------------------------------------------------
+# Context lookup — journals, programs, grants (paper / application / grant modes)
+# ---------------------------------------------------------------------------
+
+# A best-effort lookup that gathers reference info for the user's stated target
+# (a journal's author guidelines, a school/company program, or a grant
+# mechanism) and returns a source URL. Hybrid: try a web scrape first (genuine
+# fetch, citing the scraped page's URL), then fall back to an LLM-knowledge
+# lookup that also cites a canonical source URL — so we get notes + a URL for
+# known targets even when the site is JS-heavy and unscrapable. Never raises.
+_LOOKUP_CONFIG = {
+    "journal": {
+        "query": "{name} author guidelines instructions for authors",
+        "distill_sys": (
+            "You extract concise author-formatting guidelines for scientific "
+            "journals. Output ONLY a short bulleted markdown list (<=10 lines) "
+            "of the PRACTICAL rules (word/figure/table limits, abstract "
+            "structure & length, section headings, reference style). Be specific "
+            "with numbers. If the text is not real author-guidelines content, "
+            "output exactly: NO GUIDELINES FOUND"
+        ),
+        "distill_instr": (
+            "Journal: {name}\n\nBelow is text scraped from a page that may be "
+            "this journal's author guidelines. Distil the practical formatting "
+            "rules. Ignore navigation, ads, and boilerplate. If it is not "
+            "actually author guidelines, output: NO GUIDELINES FOUND\n\n"
+            "Scraped text:\n{body}"
+        ),
+        "fallback_sys": (
+            "You provide concise author-formatting guidelines for scientific "
+            "journals from your training knowledge. Output a short bulleted "
+            "markdown list (<=10 lines) of the practical rules, then on a final "
+            "line beginning with 'SOURCE: ' give the canonical URL of this "
+            "journal's instructions-for-authors page. If you do not genuinely "
+            "know this journal, output only: NO GUIDELINES FOUND"
+        ),
+        "fallback_instr": (
+            "Journal: {name}\n\nFrom your knowledge, provide the practical "
+            "author-formatting guidelines for this journal (word/figure/table "
+            "limits, abstract structure, reference style, etc.). Then end with a "
+            "line: SOURCE: <canonical instructions-for-authors URL>"
+        ),
+        "not_found": "NO GUIDELINES FOUND",
+    },
+    "program": {
+        "query": "{name} admissions requirements curriculum mission",
+        "distill_sys": (
+            "You extract concise application/program info for school or company "
+            "programs. Output ONLY a short bulleted markdown list (<=10 lines): "
+            "mission/focus, prerequisites, what the program looks for, "
+            "application components, key dates. If not real program content, "
+            "output exactly: NO INFO FOUND"
+        ),
+        "distill_instr": (
+            "Target program/institution: {name}\n\nBelow is text scraped from a "
+            "page about this program. Distil what an applicant should know. "
+            "Ignore navigation, ads, and boilerplate. If not relevant, output: "
+            "NO INFO FOUND\n\nScraped text:\n{body}"
+        ),
+        "fallback_sys": (
+            "You provide concise application/program info from your training "
+            "knowledge. Output a short bulleted markdown list (<=10 lines): "
+            "mission/focus, what it looks for in applicants, prerequisites, "
+            "notable requirements. Then on a final line beginning with "
+            "'SOURCE: ' give the canonical URL of this program's admissions/info "
+            "page. If you do not genuinely know it, output only: NO INFO FOUND"
+        ),
+        "fallback_instr": (
+            "Target program/institution: {name}\n\nFrom your knowledge, provide "
+            "concise info about this as an application target: mission/focus, "
+            "what it looks for, prerequisites, notable requirements. Then end "
+            "with a line: SOURCE: <canonical admissions/info URL>"
+        ),
+        "not_found": "NO INFO FOUND",
+    },
+    "grant": {
+        "query": "{name} grant mechanism review criteria specific aims",
+        "distill_sys": (
+            "You extract concise grant-program info. Output ONLY a short bulleted "
+            "markdown list (<=10 lines): mechanism, review criteria, application "
+            "structure (specific aims etc.), page/section limits, funding scope. "
+            "If not real grant content, output exactly: NO INFO FOUND"
+        ),
+        "distill_instr": (
+            "Grant: {name}\n\nBelow is text scraped from a page about this grant. "
+            "Distil what an applicant should know. Ignore navigation, ads, and "
+            "boilerplate. If not relevant, output: NO INFO FOUND\n\n"
+            "Scraped text:\n{body}"
+        ),
+        "fallback_sys": (
+            "You provide concise grant-program info from your training knowledge. "
+            "Output a short bulleted markdown list (<=10 lines): mechanism, review "
+            "criteria, application structure, key limits. Then on a final line "
+            "beginning with 'SOURCE: ' give the canonical URL of this grant's "
+            "program page. If you do not genuinely know it, output only: NO INFO FOUND"
+        ),
+        "fallback_instr": (
+            "Grant: {name}\n\nFrom your knowledge, provide concise info about "
+            "this grant: mechanism, review criteria, application structure "
+            "(specific aims etc.), key limits. Then end with a line: SOURCE: "
+            "<canonical program URL>"
+        ),
+        "not_found": "NO INFO FOUND",
+    },
+}
+
+
+async def _llm_call(message: str, system_prompt: str) -> str:
+    """Non-streaming LLM call with a custom system prompt (reuses the chat
+    handler's provider routing). Returns "" on failure."""
+    try:
+        from chat_handler import (
+            _get_provider,
+            _is_anthropic_provider,
+            _sync_anthropic,
+            _sync_openai_compatible,
+        )
+
+        provider = _get_provider()
+        if _is_anthropic_provider(provider["provider"]):
+            return await _sync_anthropic(
+                message, system_prompt, provider["model"], provider["api_key"]
+            )
+        return await _sync_openai_compatible(
+            message, system_prompt, provider["model"],
+            provider["api_key"], provider["base_url"],
+        )
+    except Exception as exc:
+        logger.warning("LLM call failed: %s", exc)
+        return ""
+
+
+def _parse_source_url(text: str) -> tuple[str, str]:
+    """Split a trailing 'SOURCE: <url>' line from the notes body.
+
+    Returns (notes, url); url is "" when no SOURCE line is present.
+    """
+    lines = (text or "").rstrip().splitlines()
+    url = ""
+    while lines:
+        last = lines[-1].strip()
+        if last.upper().startswith("SOURCE:"):
+            rest = last.split(":", 1)[1].strip()
+            # Take the first http(s) token (in case of surrounding prose).
+            url = next((t for t in rest.split() if t.startswith("http")), "")
+            lines.pop()
+            break
+        if not last:
+            lines.pop()
+            continue
+        break
+    notes = "\n".join(lines).strip()
+    return notes, url
+
+
+async def fetch_context_info(kind: str, name: str) -> tuple[str, bool, str]:
+    """Best-effort lookup of reference info for a journal / program / grant.
+
+    Returns (notes, ok, source_url). Uses the configured chat LLM's knowledge
+    to produce concise notes AND a canonical source URL for the target. This is
+    preferred over live web-scraping because journal/program sites are
+    typically JS-heavy and unscrapable, and scraping each candidate page via an
+    LLM distil call is slow (>20s) and usually yields nothing. ``ok`` is True
+    when notes were obtained; ``source_url`` is "" if the model provided none.
+    Never raises.
+    """
+    cfg = _LOOKUP_CONFIG.get(kind)
+    name = (name or "").strip()
+    if not cfg or not name:
+        return "", False, ""
+
+    message = cfg["fallback_instr"].format(name=name[:200])
+    text = await _llm_call(message, cfg["fallback_sys"])
+    text = (text or "").strip()
+    if not text or cfg["not_found"] in text.upper():
+        logger.info("Context lookup (%s) found nothing for '%s'", kind, name)
+        return "", False, ""
+    notes, url = _parse_source_url(text)
+    if not notes:
+        return "", False, ""
+    logger.info(
+        "Context lookup (%s) LLM-knowledge OK for '%s' (url=%s)",
+        kind, name, url or "(none)",
+    )
+    return notes, True, url
+
+
+async def fetch_journal_formatting(journal: str) -> tuple[str, bool, str]:
+    """Back-compat alias for the original journal-only entry point."""
+    return await fetch_context_info("journal", journal)
+
+
+
 def _parse_json(text: str) -> Optional[dict]:
     """Parse JSON from an LLM response, tolerating surrounding prose/fences."""
     if not text:

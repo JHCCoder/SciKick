@@ -197,9 +197,9 @@ async function connect() {
   if (ok) {
     // Show active provider
     await showProviderInfo();
-    // Show onboarding options immediately so the user can pick an interaction type
-    // before loading a project
-    if (!sessionFocus) showOnboardingOptions();
+    // Onboarding (generic brainstorming picker vs. project-goal onboarding) is
+    // decided by checkExistingSession below, once we know whether a project
+    // is active — so we don't double-prompt.
     // Check for existing session
     await checkExistingSession();
     // Re-check Drive readiness now that the server is up (the current tab
@@ -432,7 +432,17 @@ async function checkExistingSession() {
         dom.chatInput.disabled = false;
         dom.btnSend.disabled = false;
 
-        // Show onboarding options if no focus set yet
+        // Project goal — recap if set, otherwise start onboarding. Replaces
+        // the generic session-focus picker when a project is active.
+        if (mem.goal && mem.goal.mode) {
+          showGoalRecap(mem.goal);
+        } else {
+          showGoalOnboarding();
+        }
+      } else {
+        // No active session — fresh start with no project loaded. Show the
+        // generic brainstorming picker so the user can start chatting before
+        // loading a project.
         if (!sessionFocus) showOnboardingOptions();
       }
     }
@@ -522,14 +532,15 @@ async function loadProject() {
     }
 
     // Download and process the manuscript + reviewer comments from Drive
-    showSystemMessage("📥 Downloading and processing manuscript...");
+    showSystemMessage("📥 Downloading and processing manuscript... (this might take a minute)");
     let manuscriptLoaded = false;
+    let loadData = null;
     try {
       const loadRes = await fetch(`${SERVER_URL}/drive/folder/${folderId}/load-context`, {
         method: "POST",
       });
       if (loadRes.ok) {
-        const loadData = await loadRes.json();
+        loadData = await loadRes.json();
         // Best-effort: surface the folder breakdown, project summary, and
         // manuscript status. Guarded so an older server (missing fields)
         // can't break the load path.
@@ -577,6 +588,20 @@ async function loadProject() {
       showSystemMessage(
         "✅ **Ready.** I've got the lay of the land — ask me general questions about your project, or scan the document you're working on for more in-depth assistance."
       );
+    }
+
+    // Project goal — persisted per project in .scikick_memory.json. First load
+    // (no goal yet) → walk the mode-specific onboarding. Subsequent loads →
+    // recap what we know + the "say change goal" correction hint.
+    try {
+      const goal = loadData && loadData.goal;
+      if (goal && goal.mode) {
+        showGoalRecap(goal);
+      } else {
+        showGoalOnboarding();
+      }
+    } catch (e) {
+      // Non-fatal — goal onboarding can be triggered with "change goal".
     }
 
     projectLoaded = true;
@@ -737,13 +762,24 @@ async function sendMessage() {
           try {
             const data = JSON.parse(line.slice(6));
             if (data.type === "text") {
-              fullResponse += data.content;
+              // replace=true → reset the bubble to just this content (used by
+              // the goal-finalize stream to swap the interim "Looking up…"
+              // line for the final recap, instead of appending to it).
+              if (data.replace) {
+                fullResponse = data.content;
+              } else {
+                fullResponse += data.content;
+              }
               gotText = true;
               renderAssistantMessage(assistantBubble, fullResponse);
             } else if (data.type === "error") {
               fullResponse += `\n\n⚠️ Error: ${data.content}`;
               gotText = true;
               renderAssistantMessage(assistantBubble, fullResponse);
+            } else if (data.type === "goal_buttons") {
+              // "change goal" intercept — re-show the mode picker after the
+              // text message above has been rendered.
+              showGoalOnboarding();
             }
           } catch (e) {
             // partial JSON, ignore
@@ -819,39 +855,14 @@ function showOnboardingOptions() {
 
   const bubble = document.createElement("div");
   bubble.className = "message-content";
-  bubble.innerHTML = renderMarkdown(
-    "**What would you like to work on today?**\n\nChoose a focus area to help me tailor our conversation:"
-  );
+  bubble.innerHTML = renderMarkdown("So what would you like to work on today?");
 
   const btnRow = document.createElement("div");
   btnRow.className = "onboarding-buttons";
 
   const options = [
-    {
-      label: "🧠 Brainstorming",
-      focus: "brainstorming",
-      prompt: "I'd like to brainstorm today. Help me explore ideas, develop hypotheses, and think through research directions.",
-    },
-    {
-      label: "📄 Paper Discussion",
-      focus: "paper_discussion",
-      prompt: "I'd like to discuss my paper today. Help me think through the results, implications, and narrative of my manuscript.",
-    },
-    {
-      label: "✍️ Paper Writing",
-      focus: "paper_writing",
-      prompt: "I'd like to work on writing today. Help me draft, edit, and refine sections of my manuscript.",
-    },
-    {
-      label: "📝 Paper Revision",
-      focus: "revision",
-      prompt: "I'd like to work on peer review revisions today. Help me address reviewer comments and draft responses.",
-    },
-    {
-      label: "💬 Other",
-      focus: "other",
-      prompt: "I have something else in mind today. Let me explain what I need help with.",
-    },
+    { label: "🧠 Brainstorming / discussion", focus: "brainstorming" },
+    { label: "📁 Project / writing", focus: null },
   ];
 
   options.forEach((opt) => {
@@ -861,8 +872,17 @@ function showOnboardingOptions() {
     btn.addEventListener("click", () => {
       wrapper.remove();
       sessionFocus = opt.focus;
-      dom.chatInput.value = opt.prompt;
-      dom.chatInput.dispatchEvent(new Event("input"));
+      if (opt.focus === "brainstorming") {
+        addAssistantMessage(
+          "Love it — I'm ready for whatever you've got! 🚀"
+        );
+      } else {
+        addAssistantMessage(
+          "Absolutely! 📁 Load the Google Drive folder associated with your work or document " +
+          "and we'll dive in.\n\n⚠️ Heads-up: if you're using a **cloud-based LLM**, please don't " +
+          "load any folder containing sensitive personal information — keep those out of the project."
+        );
+      }
       dom.chatInput.focus();
     });
     btnRow.appendChild(btn);
@@ -872,6 +892,139 @@ function showOnboardingOptions() {
   wrapper.appendChild(bubble);
   dom.messages.appendChild(wrapper);
   scrollToBottom();
+}
+
+// ---------------------------------------------------------------------------
+// Project goal onboarding (per-project, persisted to .scikick_memory.json)
+// ---------------------------------------------------------------------------
+
+// The most recent goal-onboarding picker element, so a subtype picker (or a
+// new "change goal") can replace it cleanly.
+let _goalPickerEl = null;
+
+function addAssistantMessage(text) {
+  // Non-streamed assistant bubble — used for onboarding questions/recaps.
+  const bubble = addMessage("assistant", "", true);
+  renderAssistantMessage(bubble, text);
+  return bubble;
+}
+
+function _goalButtonsRow(options, onClick) {
+  const btnRow = document.createElement("div");
+  btnRow.className = "onboarding-buttons";
+  options.forEach((opt) => {
+    const btn = document.createElement("button");
+    btn.className = "onboarding-btn";
+    btn.textContent = opt.label;
+    btn.addEventListener("click", () => onClick(opt));
+    btnRow.appendChild(btn);
+  });
+  return btnRow;
+}
+
+function showGoalOnboarding() {
+  // Remove any existing picker so re-triggering ("change goal") doesn't stack.
+  if (_goalPickerEl && _goalPickerEl.parentElement) _goalPickerEl.remove();
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "message assistant";
+  const bubble = document.createElement("div");
+  bubble.className = "message-content";
+  bubble.innerHTML = renderMarkdown(
+    "**What's the goal for this project?**\n\nPick a mode and I'll tailor our work to it. " +
+    "(You can change this anytime by saying **“change goal”**.)"
+  );
+
+  bubble.appendChild(
+    _goalButtonsRow(
+      [
+        { label: "📝 Paper Revision", mode: "paper_revision" },
+        { label: "✍️ Paper Writing", mode: "paper_writing" },
+        { label: "💰 Grant", mode: "grant" },
+        { label: "🎓 Application", mode: "application" },
+        { label: "🧠 Brainstorming", mode: "brainstorming" },
+        { label: "📄 Paper Discussion", mode: "paper_discussion" },
+        { label: "💬 Other", mode: "other" },
+      ],
+      (opt) => pickGoalMode(opt.mode)
+    )
+  );
+
+  wrapper.appendChild(bubble);
+  dom.messages.appendChild(wrapper);
+  _goalPickerEl = wrapper;
+  scrollToBottom();
+}
+
+function pickGoalMode(mode) {
+  if (mode === "grant") {
+    showGoalSubtypes(mode, "What kind of grant are you aiming for?", [
+      { label: "NIH", sub: "NIH" },
+      { label: "NSF", sub: "NSF" },
+      { label: "ERC", sub: "ERC" },
+      { label: "Foundation", sub: "foundation" },
+      { label: "Industry", sub: "industry" },
+      { label: "Other", sub: "other" },
+    ]);
+    return;
+  }
+  if (mode === "application") {
+    showGoalSubtypes(mode, "What kind of application is this?", [
+      { label: "Job", sub: "job" },
+      { label: "Med School", sub: "med_school" },
+      { label: "Grad School / PhD", sub: "grad_school" },
+      { label: "Other Professional", sub: "other_professional" },
+    ]);
+    return;
+  }
+  postGoal(mode, "");
+}
+
+function showGoalSubtypes(mode, prompt, subs) {
+  if (_goalPickerEl && _goalPickerEl.parentElement) _goalPickerEl.remove();
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "message assistant";
+  const bubble = document.createElement("div");
+  bubble.className = "message-content";
+  bubble.innerHTML = renderMarkdown(`**${prompt}**`);
+  bubble.appendChild(
+    _goalButtonsRow(subs, (opt) => postGoal(mode, opt.sub))
+  );
+  wrapper.appendChild(bubble);
+  dom.messages.appendChild(wrapper);
+  _goalPickerEl = wrapper;
+  scrollToBottom();
+}
+
+async function postGoal(mode, subtype) {
+  if (_goalPickerEl && _goalPickerEl.parentElement) _goalPickerEl.remove();
+  try {
+    const res = await fetch(`${SERVER_URL}/chat/goal`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode, subtype }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Failed to start goal onboarding");
+    }
+    const data = await res.json();
+    if (data.done) {
+      addAssistantMessage(data.recap || "Goal saved.");
+    } else {
+      // The AI "asks" the next free-text question — the user replies in chat,
+      // and the server captures it (bypassing the LLM) on the next /chat/send.
+      addAssistantMessage(data.question || "Tell me more.");
+    }
+  } catch (e) {
+    showSystemMessage(`⚠️ ${e.message}`);
+  }
+}
+
+function showGoalRecap(goal) {
+  if (!goal || !goal.mode) return;
+  addAssistantMessage(goal.recap || "Goal loaded.");
 }
 
 function renderMarkdown(text) {

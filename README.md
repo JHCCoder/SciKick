@@ -159,6 +159,7 @@ Ask questions like:
 - "Help me rephrase this paragraph to be clearer"
 - "Scan and keep the supplemental material, then review my Figure S18ex legend"
 - "Scan the reviewer PDF — what are the main concerns?"
+- "change goal" — re-run the project-goal setup (switch mode/journal/grant/application)
 
 ---
 
@@ -205,6 +206,25 @@ SciKick can chat with a model running entirely on your machine — fully private
 ### Switching providers later
 
 Run `./start.sh --setup` again, or edit `.env` directly and restart the server. (Provider/model/key set in the ⚙ Settings panel override `.env` at runtime.)
+
+---
+
+## Project Goals & Modes
+
+The first time you load a project, SciKick asks **what you're working on** and tailors every conversation to that goal. The goal is saved per-project in `.scikick_memory.json`, so it carries across sessions and machines.
+
+**Modes:**
+
+| Mode | Follow-up asked | Why |
+|------|-----------------|-----|
+| 📝 Paper Revision / ✍️ Paper Writing | Target journal | SciKick looks up that journal's author guidelines (word/figure limits, abstract structure, citation style) + a source URL and factors them into revision/writing advice |
+| 💰 Grant | Grant type (NIH, NSF, ERC, foundation, industry, other) | Looks up the grant mechanism / review criteria + source URL; tailors advice to its aims and structure |
+| 🎓 Application | Application type (job, med school, grad school/PhD, other) → target | Looks up the target program's mission, prerequisites, and what it looks for + source URL |
+| 🧠 Brainstorming / 📄 Paper Discussion / 💬 Other | None | General-purpose |
+
+**On later loads**, SciKick recaps the saved goal (including the looked-up info and its source URL) and tells you to say **"change goal"** if anything is wrong — which re-runs the whole question pipeline and overwrites the saved goal.
+
+> The lookup uses your configured AI's knowledge to pull together the target's key info **and a canonical source URL** (e.g. the journal's instructions-for-authors page, the program's admissions page). Journal/program websites are often JavaScript-rendered and can't be reliably scraped, so the AI draws on its training knowledge rather than live-scraping the page — always click the cited URL to verify specifics before submission. If the AI doesn't know a target, it says so and falls back to general advice.
 
 ---
 
