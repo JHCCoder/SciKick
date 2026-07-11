@@ -717,7 +717,9 @@ def _match_named_file_by_tokens(message: str) -> tuple[str, str] | None:
 
     if best_file is None or best_score < 1:
         return None
-    logger.info(
+    # DEBUG, not INFO: _match_named_file_by_tokens is a pure helper called
+    # multiple times per request, so INFO would log the same match repeatedly.
+    logger.debug(
         "Focus file: token-matched '%s' (score=%d), file_id=%s",
         best_file.get("name"), best_score, best_file.get("id"),
     )
@@ -758,7 +760,10 @@ def _match_named_file(message: str) -> tuple[str, str] | None:
                 best_key, len(best_entries), entry["id"],
             )
         else:
-            logger.info("Focus file: matched '%s' in message, file_id=%s", best_key, entry["id"])
+            # DEBUG, not INFO: _match_named_file is a pure helper reused by
+            # several call sites per request (classify + keep/focus handlers),
+            # so INFO would log the same match several times.
+            logger.debug("Focus file: matched '%s' in message, file_id=%s", best_key, entry["id"])
         return entry["id"], entry["name"]
 
     # No literal-substring match — try distinctive-token matching.
@@ -2341,6 +2346,29 @@ async def send_message(req: ChatRequest):
         len(system_prompt),
         len(user_message),
     )
+
+    # Summarize the full-text documents injected into this request so a
+    # downstream API rejection (e.g. Gemini 400 INVALID_ARGUMENT) can be
+    # traced to a specific document by name/size without re-deriving state.
+    _ctx_docs = []
+    if focused_file_content:
+        _ctx_docs.append(f"focused={len(focused_file_content)}c")
+    if full_manuscript_content:
+        _ctx_docs.append(f"manuscript_scan={len(full_manuscript_content)}c")
+    elif _current_doc is not None:
+        _ctx_docs.append(
+            f"manuscript='{_current_doc_file_name}'={len(_current_doc.full_text)}c"
+        )
+    for _d in _loaded_docs:
+        _ctx_docs.append(f"kept='{_d.get('name', '?')}'={len(_d.get('text') or '')}c")
+    for _sp in _scraped_docs:
+        _ctx_docs.append(f"scraped='{_sp.title or '?'}'={len(_sp.full_text or '')}c")
+    if _current_comments:
+        _ctx_docs.append(
+            f"comments={len(_current_comments)}"
+            f"({sum(len(c.text) for c in _current_comments)}c)"
+        )
+    logger.info("Chat request context docs: %s", " | ".join(_ctx_docs) or "(none)")
 
     if _is_anthropic_provider(provider["provider"]):
         stream = _stream_anthropic(
