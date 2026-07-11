@@ -4,6 +4,7 @@ import asyncio
 import io
 import logging
 import pickle
+import threading
 import time
 from functools import partial
 from pathlib import Path
@@ -31,36 +32,98 @@ router = APIRouter()
 # Authentication
 # ---------------------------------------------------------------------------
 
-_drive_service = None
-_sheets_service = None
+# Per-thread Drive/Sheets services. googleapiclient's default transport is
+# httplib2.Http, which is NOT thread-safe. load_context fans concurrent
+# downloads across thread-pool workers (asyncio.Semaphore(4) + gather); sharing
+# one Http/SSL connection across those workers corrupts OpenSSL 3's
+# per-connection GCM state and segfaults — EXC_BAD_ACCESS in
+# ossl_gcm_set_ctx_params during SSL_read. A thread-local service gives each
+# worker its own Http, so concurrent downloads stay isolated.
+_drive_tls = threading.local()
+_sheets_tls = threading.local()
+
+# Bumped on OAuth re-auth so every thread drops its cached service and rebuilds
+# with the new token. Read/written under _creds_lock.
+_service_generation = 0
+_creds_lock = threading.Lock()
+# (generation, credentials) — credentials are read-only after load (the access
+# token is fixed for the process; a refresh happens at most once per generation
+# inside _load_credentials), so the single cached object is shared safely
+# across all worker threads.
+_cached_creds: tuple[int, Optional[Credentials]] = (-1, None)
+
+
+def _get_credentials(generation: int) -> Optional[Credentials]:
+    """Return cached credentials for ``generation``, loading once if needed."""
+    global _cached_creds
+    cached_gen, cached_creds = _cached_creds
+    if cached_gen == generation:
+        return cached_creds
+    with _creds_lock:
+        cached_gen, cached_creds = _cached_creds
+        if cached_gen == generation:  # double-checked after acquiring the lock
+            return cached_creds
+        creds = _load_credentials()
+        _cached_creds = (generation, creds)
+        return creds
+
+
+def _invalidate_services() -> None:
+    """Drop cached services/credentials so they rebuild on next use.
+
+    Called after OAuth re-auth, replacing the old ``_drive_service = None``
+    reset. Bumping the generation invalidates every thread's thread-local
+    service at once (thread-locals can't be enumerated from outside their
+    owning thread, so a generation stamp is the clean way to evict them).
+    """
+    global _service_generation
+    with _creds_lock:
+        _service_generation += 1
 
 
 def get_drive_service() -> Optional[object]:
-    """Return an authorised Drive service, or None if not yet authenticated."""
-    global _drive_service
-    if _drive_service is not None:
-        return _drive_service
+    """Return an authorised Drive service, or None if not yet authenticated.
 
-    creds = _load_credentials()
+    Each thread gets its own service (and its own httplib2.Http); see
+    _drive_tls. The service is rebuilt when the generation advances (re-auth).
+    """
+    gen = getattr(_drive_tls, "generation", -1)
+    if gen == _service_generation:
+        return getattr(_drive_tls, "service", None)
+
+    creds = _get_credentials(_service_generation)
     if creds is None:
+        _drive_tls.service = None
+        _drive_tls.generation = _service_generation
         return None
 
-    _drive_service = build("drive", "v3", credentials=creds)
-    return _drive_service
+    svc = build("drive", "v3", credentials=creds)
+    _drive_tls.service = svc
+    _drive_tls.generation = _service_generation
+    return svc
 
 
 def get_sheets_service() -> Optional[object]:
-    """Return an authorised Sheets service, or None if not yet authenticated."""
-    global _sheets_service
-    if _sheets_service is not None:
-        return _sheets_service
+    """Return an authorised Sheets service, or None if not yet authenticated.
 
-    creds = _load_credentials()
+    Per-thread, like get_drive_service — _export_google_sheet runs inside
+    download_file's thread-pool worker and would otherwise share the Drive
+    service's Http.
+    """
+    gen = getattr(_sheets_tls, "generation", -1)
+    if gen == _service_generation:
+        return getattr(_sheets_tls, "service", None)
+
+    creds = _get_credentials(_service_generation)
     if creds is None:
+        _sheets_tls.service = None
+        _sheets_tls.generation = _service_generation
         return None
 
-    _sheets_service = build("sheets", "v4", credentials=creds)
-    return _sheets_service
+    svc = build("sheets", "v4", credentials=creds)
+    _sheets_tls.service = svc
+    _sheets_tls.generation = _service_generation
+    return svc
 
 
 def _load_credentials() -> Optional[Credentials]:
@@ -143,10 +206,9 @@ async def auth_callback(state: str = Query(...), code: str = Query(...)):
         logger.warning("OAuth scope changed — token obtained with new scopes")
     _save_credentials(flow.credentials)
 
-    # Re-initialise services
-    global _drive_service, _sheets_service
-    _drive_service = None
-    _sheets_service = None
+    # Re-initialise services (bumps the generation so every thread's cached
+    # service rebuilds with the new token on next use).
+    _invalidate_services()
 
     return HTMLResponse(content=_AUTH_SUCCESS_HTML)
 
