@@ -56,7 +56,14 @@ Rules:
   exchange actually establishes a status change / response draft / note.
 - key_facts: durable facts about the paper or project — NOT chit-chat, not
   pleasantries, not restatements of the exchange.
-- summary: a single short line.
+- NEVER record that a document was "scanned", "kept", "loaded", "focused", or
+  "added to context" — in decisions, key_facts, OR summary. That state is
+  ephemeral (server memory only, cleared on restart) and is NOT restored on
+  resume, so recording it would mislead future sessions into thinking the file
+  is already loaded. Scanning/keeping a file is a routine operation, not a
+  durable fact worth remembering.
+- summary: a single short line about the substantive topic discussed — never
+  enumerate which files were scanned or kept.
 - If nothing worth remembering, return {"summary":"one-line recap"}.
 """
 

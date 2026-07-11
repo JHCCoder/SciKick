@@ -384,7 +384,9 @@ RESUME_PROMPT_EXTENSION = """
 ## Session Resumed
 The researcher is continuing a previous session. Below is a summary of where they left off.
 
-**Kept files do not survive a restart.** Project files the researcher asked to "keep in context" are held in server memory only and are cleared whenever the server restarts — they are NOT restored from this resume summary. The "## Loaded Documents" block in the current message is the sole source of truth for what is loaded right now. If that block lists no files (or says none are kept), then no files are in context, even if the summary below mentions files kept in a prior session. Do not tell the researcher a file is "already loaded" or "already kept" unless it appears in that block — if they ask to scan/keep a file, act on the request rather than claiming it is already loaded.
+**Kept/scanned files do not survive a restart.** Project files the researcher asked to "keep in context" or "scan" are held in server memory only and are cleared whenever the server restarts — they are NOT restored from this resume summary. The "## Loaded Documents" block in the current message is the SOLE source of truth for what is loaded right now. The "### Previous Context" recap below may mention files that were scanned or kept in a PRIOR session — those mentions are stale and do NOT mean the files are currently loaded.
+
+If the "## Loaded Documents" block lists no kept files (or says none are kept), then no files are in context, even if the recap below mentions files kept or scanned in a prior session. Do not tell the researcher a file is "already loaded", "already kept", "already scanned", "already in context", "I have it", or "I've read it" unless that file appears in the current "## Loaded Documents" block. (The manuscript and reviewer comments ARE auto-loaded on Load Project, so they may legitimately be in context — but supplements and other project files are not, unless listed.) If the researcher asks to scan or keep a file, act on the request — do not claim it is already done.
 """
 
 
