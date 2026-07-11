@@ -523,12 +523,12 @@ def goal_recap_text(goal: "GoalState") -> str:
             bits.append(f"targeting **{goal.journal}**")
         if goal.journal_lookup_ok and goal.journal_source_url:
             bits.append(
-                f"— these formatting notes come from my training knowledge of "
-                f"{goal.journal}, not a live read of its guidelines "
-                f"(canonical guidelines page: {goal.journal_source_url}). "
-                f"If you need the exact/detailed rules, open that page in a tab "
-                f"and click **Scrape this page** to pull the real guidelines "
-                f"into context"
+                f"— I inserted a rough journal-specific formatting guideline "
+                f"from my training knowledge of {goal.journal} into context. "
+                f"However, this is not a live read of its guidelines, so if you "
+                f"need the exact/detailed rule, find the specific guide in a new "
+                f"tab and scrape the real guidelines into context "
+                f"(Good place to start: {goal.journal_source_url})"
             )
         elif goal.journal_lookup_ok and goal.journal_formatting:
             bits.append(
@@ -571,7 +571,7 @@ def goal_recap_text(goal: "GoalState") -> str:
     return (
         "Got it — " + " ".join(bits) + ". "
         "I'll keep this in mind for every conversation on this project. "
-        'If any of this is wrong, just say **"change goal"**.'
+        'To change the goal/purpose associated with this folder, just say **"change goal"**.'
     )
 
 
