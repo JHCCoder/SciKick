@@ -27,10 +27,11 @@ Whether you're preparing a new manuscript or responding to peer review, SciKick 
 * Draft and refine responses to reviewers
 * Summarize documents and literature
 * Maintain continuity across long-term research projects
+* Set a project goal—paper revision, grant writing, application, or brainstorming—and SciKick tailors its guidance to that purpose, including journal-specific formatting notes
 
 ## Built for researchers
 
-SciKick works directly with your Google Drive research folders, keeping manuscripts, figures, supplemental files, reviewer comments, and related documents organized in one place.
+SciKick works directly with your Google Drive research folders, keeping manuscripts, figures, supplemental files, reviewer comments, and related documents organized in one place. When you load a project, SciKick asks what you're working toward—a manuscript revision, a grant, an application, or open brainstorming—and shapes its suggestions around that goal, with a quick recap each time you return.
 
 To maintain continuity across sessions, SciKick automatically creates and updates a **.scikick_memory.json** file within your project folder. This project memory preserves important discussions, decisions, plans, and research context, allowing you—or SciKick running on another computer—to quickly pick up where you left off without losing momentum.
 
