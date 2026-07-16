@@ -470,6 +470,10 @@ ${s3}"; then
         echo "  → Click 'ADD USERS' → enter your email → 'ADD'"
         echo "  This lets you sign in before Google verifies the app —"
         echo "     otherwise you'll get an 'unverified app' error."
+        echo "  Tip: add every Google account you might want to use SciKick with"
+        echo "  here. While the app is in 'testing' mode, only listed test users"
+        echo "  can grant Drive access — so each account you want to install"
+        echo "  SciKick on needs to be added to this list."
         read -r -p "Press Enter when done…"
         save_state 4
     fi
