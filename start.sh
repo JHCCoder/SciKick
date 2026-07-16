@@ -317,15 +317,28 @@ except:
         echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
         echo ""
         echo "scikick needs access to your Google Drive to load your papers."
+        echo ""
+        echo "For safety reasons, SciKick does not have automatic access to"
+        echo "your Google Drive folders. Unfortunately, this means you have to"
+        echo "enable Google Drive access to your own account manually through"
+        echo "your Google Cloud account."
+        echo ""
+        echo "(To grant automatic access to every user, Google requires the app"
+        echo "to pass a formal verification process for its 'restricted' Drive"
+        echo "scopes — including a third-party security audit that costs"
+        echo "thousands of dollars, takes weeks to complete, and recurs"
+        echo "annually. Since SciKick runs locally and only you need access,"
+        echo "routing it through your own Cloud project in 'testing' mode"
+        echo "sidesteps all of that — free and immediate.)"
+        echo ""
         echo "I'll walk you through this in ~3–10 minutes."
         echo "You'll need a Google account (any Gmail works)."
         echo ""
-        echo -e "${YELLOW}Why this is needed:${NC}"
-        echo "  SciKick reads your Google Drive through your own Google Cloud"
-        echo "  project — it doesn't use a shared SciKick Google account. You'll"
-        echo "  create a personal OAuth credential (free, one-time) that lets the"
-        echo "  local server read your Drive. This is how the app gets Drive"
-        echo "  access; it's separate from the Chrome Web Store listing."
+        echo -e "${YELLOW}Good to know:${NC}"
+        echo "  You're creating a personal OAuth credential (free, one-time) under"
+        echo "  your own account — SciKick never sees or stores a shared Drive"
+        echo "  password. This Drive access is separate from the Chrome Web Store"
+        echo "  listing."
         echo ""
 
         if command -v gcloud &>/dev/null; then
@@ -343,7 +356,7 @@ except:
     if [ "$STEP" -lt 1 ]; then
         echo -e "${YELLOW}Step 1/6: Create a Google Cloud project${NC}"
         echo "A 'project' is just a container for your app settings."
-        echo "Name it whatever you like — we recommend 'SciKick'."
+        echo "Name it whatever you like — we recommend 'SciKick GoogleDrive access'."
         echo ""
         if command -v open &>/dev/null; then
             read -r -p "Open the project creation page in your browser? [Y/n]: " resp
@@ -374,7 +387,7 @@ except:
         else
             echo "Go to: $drive_url"
         fi
-        echo "  → Make sure your project is selected (dropdown at the top)"
+        echo "  → Make sure your cloud project is selected (dropdown at the top)"
         echo "  → Click the blue 'ENABLE' button"
         read -r -p "Press Enter when done…"
         save_state 2
@@ -394,7 +407,7 @@ except:
         else
             echo "Go to: $sheets_url"
         fi
-        echo "  → Make sure your project is selected (dropdown at the top)"
+        echo "  → Make sure your cloud project is selected (dropdown at the top)"
         echo "  → Click the blue 'ENABLE' button"
         read -r -p "Press Enter when done…"
         save_state 3
@@ -415,9 +428,9 @@ except:
             echo "Go to: $consent_url"
         fi
         echo ""
-        echo "  → Make sure your project is selected (dropdown at the top)"
+        echo "  → Make sure your cloud project is selected (dropdown at the top)"
         echo "  → In the left sidebar, click 'OAuth consent screen'."
-        echo "  → If this is a new project, you'll see an Overview page with a"
+        echo "  → If this is a new cloud project, you'll see an Overview page with a"
         echo "    'GET STARTED' button (the OAuth platform isn't configured yet)."
         echo "    Click 'GET STARTED'."
         echo ""
@@ -434,7 +447,9 @@ except:
         echo "  Finish:"
         echo "  → Check the agreement box → 'CONTINUE & CREATE'"
         echo ""
-        echo "  Next, add the API scopes: 'Data access' → 'ADD OR REMOVE SCOPES'."
+        echo "  Next, to add the API scopes:"
+        echo "  Click on the 'Data Access' section, and click on 'Add or remove scopes'."
+        echo "  In the panel that pops up, scroll to the bottom and continue from here."
         echo "  Use the 'Manually paste scopes' box — it takes all 3 at once:"
         local s1="https://www.googleapis.com/auth/drive.readonly"
         local s2="https://www.googleapis.com/auth/drive.file"
@@ -447,9 +462,11 @@ ${s3}"; then
         else
             echo "  (Couldn't reach the clipboard — copy the 3 lines above manually.)"
         fi
+        echo "  Click 'Add to table' after pasting."
         echo "  → Click 'UPDATE' → 'SAVE'"
         echo ""
-        echo "  Next to add Test user go to 'Audience' section:"
+        echo "  Next, to add yourself as the test user so you can use your own new scope:"
+        echo "  Click on the 'Audience' section on the left."
         echo "  → Click 'ADD USERS' → enter your email → 'ADD'"
         echo "  This lets you sign in before Google verifies the app —"
         echo "     otherwise you'll get an 'unverified app' error."
@@ -472,7 +489,7 @@ ${s3}"; then
             echo "Go to: $cred_url"
         fi
         echo ""
-        echo "  → Make sure your project is selected (dropdown at the top)"
+        echo "  → Make sure your cloud project is selected (dropdown at the top)"
         echo "  → Click '+ CREATE CREDENTIALS' (top) → 'OAuth client ID'"
         echo "  → Application type: 'Desktop application'"
         echo "  → Name: 'scikick Desktop'"
