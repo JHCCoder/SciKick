@@ -473,6 +473,25 @@ async function loadProject() {
   // Save for later sessions
   await chrome.storage.local.set({ driveFolderId: folderId });
 
+  // Gate: if Drive isn't authenticated, point the user at the one-time setup
+  // instead of letting resume fail with a confusing 401/404.
+  if (!driveReady) {
+    await checkDriveStatus(); // refresh in case auth just completed
+  }
+  if (!driveReady) {
+    showSystemMessage(
+      "📁 **Google Drive access needed**\n\n" +
+      "SciKick needs its own Google Drive credentials to read this folder. " +
+      "In a terminal, run:\n\n" +
+      "`./start.sh --drive`\n\n" +
+      "That runs a one-time Google Cloud setup (it explains each step). " +
+      "Then come back and click **Load Project** again. " +
+      `If you've already set up credentials, visit **${SERVER_URL}/drive/auth/url** ` +
+      "to sign in with Google first."
+    );
+    return;
+  }
+
   dom.btnLoad.disabled = true;
   dom.btnLoad.textContent = "Loading...";
   loadingInProgress = true;
@@ -483,13 +502,19 @@ async function loadProject() {
 
     const resumeRes = await fetch(`${SERVER_URL}/drive/folder/${folderId}/resume`);
     if (!resumeRes.ok) {
-      const err = await resumeRes.json();
+      const err = await resumeRes.json().catch(() => ({}));
       if (resumeRes.status === 401) {
         showSystemMessage(
           "🔐 Google authentication required.\n\n" +
           `Please visit **${SERVER_URL}/drive/auth/url** in your browser to sign in with Google, ` +
           "then click Load Project again."
         );
+        return;
+      }
+      if (resumeRes.status === 404 || resumeRes.status === 403) {
+        // Folder not accessible to the authenticated account (wrong ID, deleted,
+        // or shared with a different account). Server sends a friendly detail.
+        showSystemMessage(`⛔ ${err.detail || "Couldn't access that Google Drive folder."}`);
         return;
       }
       throw new Error(err.detail || "Failed to load project");
@@ -741,6 +766,15 @@ async function sendMessage() {
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: res.statusText }));
+      if (res.status === 400) {
+        // Needs configuration (e.g. no API key configured) — show as guidance,
+        // not a crash. Drop the empty typing-dots assistant bubble first.
+        if (assistantBubble && assistantBubble.parentElement) {
+          assistantBubble.parentElement.remove();
+        }
+        showSystemMessage(`⚙️ ${err.detail || "LLM not configured — open ⚙ Settings."}`);
+        return;
+      }
       throw new Error(err.detail || "Chat request failed");
     }
 

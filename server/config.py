@@ -205,7 +205,8 @@ def get_llm_config() -> dict:
     if not api_key:
         raise RuntimeError(
             f"No API key configured for provider '{provider}'. "
-            f"Open ⚙ Settings in the SciKick side panel to enter your API key."
+            f"Open ⚙ Settings in the SciKick side panel to enter your API key, "
+            f"or set up a local LLM (Ollama / LM Studio / MLX) — no API key needed."
         )
 
     if provider == "custom" and not base_url:

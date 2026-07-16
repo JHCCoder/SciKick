@@ -16,6 +16,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseDownload
 
 from config import (
@@ -23,6 +24,7 @@ from config import (
     GOOGLE_TOKEN_FILE,
     GOOGLE_SCOPES,
     LOCAL_CACHE_DIR,
+    PORT,
 )
 
 logger = logging.getLogger("paper-assistant.drive")
@@ -1234,8 +1236,26 @@ async def resume_project(folder_id: str):
     if service is None:
         raise HTTPException(status_code=401, detail="Not authenticated with Google")
 
+    auth_url_hint = (
+        f"http://localhost:{PORT}/drive/auth/url"
+    )
+
+    def _folder_access_detail() -> str:
+        return (
+            f"Couldn't access that Google Drive folder (ID: {folder_id}). "
+            "Check that the URL/ID is correct and that the folder is shared with "
+            "the Google account you signed in with. To switch accounts, run "
+            "`./start.sh --drive` or visit " + auth_url_hint + " in your browser."
+        )
+
     # 1. List files
-    files = await _run_in_thread(_list_files_flat, folder_id)
+    try:
+        files = await _run_in_thread(_list_files_flat, folder_id)
+    except HttpError as exc:
+        status = exc.resp.status if exc.resp is not None else None
+        if status in (403, 404):
+            raise HTTPException(status_code=404, detail=_folder_access_detail())
+        raise HTTPException(status_code=502, detail=f"Google Drive error: {exc}")
 
     # 2. Check for existing memory file
     memory_result = await load_memory_file(folder_id)
@@ -1243,9 +1263,15 @@ async def resume_project(folder_id: str):
     memory_data = memory_result.get("memory")
 
     # 3. Get folder metadata
-    folder_meta = await _run_in_thread(
-        service.files().get(fileId=folder_id, fields="name").execute
-    )
+    try:
+        folder_meta = await _run_in_thread(
+            service.files().get(fileId=folder_id, fields="name").execute
+        )
+    except HttpError as exc:
+        status = exc.resp.status if exc.resp is not None else None
+        if status in (403, 404):
+            raise HTTPException(status_code=404, detail=_folder_access_detail())
+        raise HTTPException(status_code=502, detail=f"Google Drive error: {exc}")
     folder_name = folder_meta.get("name", "Project")
 
     # 4. If memory exists, restore it into the memory manager

@@ -2301,7 +2301,10 @@ def _get_provider() -> dict:
     try:
         return get_llm_config()
     except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        # 400, not 500: a missing API key / unconfigured provider is a client
+        # setup issue, not a server crash. The detail from get_llm_config is
+        # already actionable (points to ⚙ Settings / local LLM).
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 # ---------------------------------------------------------------------------
