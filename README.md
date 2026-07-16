@@ -3,6 +3,9 @@
 **SciKick is a context-aware AI assistant for scientific research.** It brings together your manuscripts, supplemental material, reviewer comments, research documents, and selected literature into a single workspace where you can ask questions, improve writing, plan revisions, identify gaps, and accelerate your research using local or cloud AI models.
 
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Buy%20me%20a%20coffee-ff5e5b?logo=ko-fi)](https://ko-fi.com/scikick)
+[![Chrome Web Store](https://img.shields.io/badge/Chrome%20Web%20Store-Install%20SciKick-4285F4?logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/search/SciKick)
+
+> **Easiest install:** get SciKick from the [Chrome Web Store](https://chromewebstore.google.com/search/SciKick) — no build step required. The [Quick Start](#quick-start) below is for building from source or running a development build.
 
 ---
 
