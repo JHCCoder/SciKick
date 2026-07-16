@@ -128,6 +128,33 @@ _scan_preference: str = ""  # "" | "yes" | "no"
 _goal_onboarding: bool = False  # pipeline active (between mode pick and finalize)
 _awaiting_goal_field: str = ""  # journal | grant_details | target | freeform
 _pending_goal: Optional[GoalState] = None  # accumulates answers until finalize
+_goal_discussing: bool = False  # a goal-field reply is being discussed, not yet answered
+
+# Phrases that mark a goal-field reply as a discussion/uncertainty reply rather
+# than a real answer — such replies are passed to the LLM for a guided chat
+# instead of being captured verbatim and looked up. Conservative: only clearly
+# discussion-shaped replies match; real answers ("UCLA", "Nature", "R01") do not.
+_DISCUSSION_REPLY_MARKERS = (
+    # uncertainty
+    "not sure", "unsure", "don't know", "dont know", "no idea",
+    "haven't decided", "havent decided", "still deciding", "thinking about",
+    "debating", "torn", "weighing", "undecided", "not certain",
+    # discussion request
+    "could we discuss", "can we discuss", "let's discuss", "lets discuss",
+    "can we talk", "could we talk", "talk it through", "what do you think",
+    "what would you recommend", "any suggestions", "any advice",
+    "help me decide", "help me choose", "which should i",
+)
+
+
+def _is_discussion_reply(message: str) -> bool:
+    """True if a goal-onboarding reply is a discussion/uncertainty reply (e.g.
+    "I'm not sure, could we discuss this?") rather than a concrete answer."""
+    low = (message or "").strip().lower()
+    if not low:
+        return False
+    return any(marker in low for marker in _DISCUSSION_REPLY_MARKERS)
+
 
 # Phrases that re-trigger the goal pipeline (clears the saved goal first).
 _CHANGE_GOAL_PHRASES = (
@@ -522,6 +549,26 @@ def _build_system_prompt() -> str:
     memory = get_current_memory()
     if memory and memory.goal and memory.goal.mode:
         prompt += "\n\n" + goal_block(memory.goal)
+
+    # While a goal-field reply is being discussed (the user gave a discussion/
+    # uncertainty reply during onboarding instead of a concrete answer), guide
+    # the LLM to help them think it through — without claiming anything was set.
+    if _goal_onboarding and _awaiting_goal_field and _goal_discussing:
+        label = {
+            "journal": "target journal",
+            "grant_details": "grant details",
+            "target": "target school or program",
+            "freeform": "application details",
+        }.get(_awaiting_goal_field, "goal")
+        prompt += (
+            "\n\n## Goal Decision In Progress\n"
+            f"The user is deciding on their {label} for this project's goal and "
+            "wants to discuss it first. Help them think it through conversationally "
+            "and briefly — offer a few considerations, maybe one clarifying "
+            "question. Do NOT claim the goal has been set or that you recorded "
+            "anything. When they name a concrete choice, they'll give it as a "
+            "direct answer and it will be captured then."
+        )
 
     # Classified project structure — a metadata overview of every file in the
     # loaded Drive folder (names + types only). Tells the model what's in the
@@ -1537,8 +1584,9 @@ async def _start_goal_onboarding(mode: str, subtype: str = "") -> dict:
     Returns {"question", "field"} when a free-text answer is needed, or
     {"recap"} when the mode needs no questions and is finalized immediately.
     """
-    global _goal_onboarding, _awaiting_goal_field, _pending_goal
+    global _goal_onboarding, _awaiting_goal_field, _pending_goal, _goal_discussing
     _pending_goal = GoalState(mode=mode)
+    _goal_discussing = False
     if mode == "grant":
         _pending_goal.grant_type = subtype or "other"
     elif mode == "application":
@@ -1563,7 +1611,7 @@ async def _advance_goal(message: str) -> Optional[dict]:
     the caller via _finalize_goal / _goal_finalize_stream, so the lookup can
     stream an interim "Looking up…" message instead of blocking silently.
     """
-    global _awaiting_goal_field
+    global _awaiting_goal_field, _goal_discussing
     field = _awaiting_goal_field
     if not field or _pending_goal is None:
         return None
@@ -1584,6 +1632,7 @@ async def _advance_goal(message: str) -> Optional[dict]:
         _pending_goal.freeform = msg[:500]
 
     _awaiting_goal_field = ""
+    _goal_discussing = False  # a concrete answer arrived — discussion is over
     return {"captured": True}
 
 
@@ -1657,12 +1706,13 @@ async def _finalize_goal() -> str:
     model uses its own knowledge. Callers that stream (the /chat/send capture
     path) show an interim "Looking up…" message first via _goal_finalize_stream.
     """
-    global _goal_onboarding, _awaiting_goal_field, _pending_goal
+    global _goal_onboarding, _awaiting_goal_field, _pending_goal, _goal_discussing
     memory = get_current_memory()
     if memory is None or _pending_goal is None:
         _goal_onboarding = False
         _awaiting_goal_field = ""
         _pending_goal = None
+        _goal_discussing = False
         return "Goal saved."
 
     g = _pending_goal
@@ -1687,6 +1737,7 @@ async def _finalize_goal() -> str:
     _goal_onboarding = False
     _awaiting_goal_field = ""
     _pending_goal = None
+    _goal_discussing = False
     return recap
 
 
@@ -1712,7 +1763,7 @@ async def _goal_finalize_stream():
 
 def _reset_goal_for_change() -> None:
     """Clear the saved goal and re-arm onboarding (for "change goal")."""
-    global _goal_onboarding, _awaiting_goal_field, _pending_goal
+    global _goal_onboarding, _awaiting_goal_field, _pending_goal, _goal_discussing
     memory = get_current_memory()
     if memory is not None:
         memory.goal = None
@@ -1721,6 +1772,7 @@ def _reset_goal_for_change() -> None:
     _goal_onboarding = True
     _awaiting_goal_field = ""
     _pending_goal = None
+    _goal_discussing = False
 
 
 async def _handle_goal_intercept(message: str) -> Optional[dict]:
@@ -1731,6 +1783,7 @@ async def _handle_goal_intercept(message: str) -> Optional[dict]:
     Requires an active memory (a loaded project); without one, goal commands
     are passed through to the LLM unchanged.
     """
+    global _goal_discussing
     if get_current_memory() is None:
         return None
 
@@ -1746,6 +1799,14 @@ async def _handle_goal_intercept(message: str) -> Optional[dict]:
         }
 
     if _goal_onboarding and _awaiting_goal_field:
+        if _is_discussion_reply(message):
+            # Not a concrete answer — the user wants to discuss before deciding.
+            # Pass the message to the LLM for a guided chat (the system prompt
+            # gets a "Goal Decision In Progress" hint). Do NOT call _advance_goal,
+            # so the awaited field stays armed and the user's next real answer
+            # (e.g. "UCLA") is captured + finalized normally.
+            _goal_discussing = True
+            return None
         result = await _advance_goal(message)
         if result and result.get("captured"):
             # Finalize via a streaming generator so the lookup can show an
@@ -2879,6 +2940,7 @@ async def refresh_context():
         _goal_onboarding = False
         _awaiting_goal_field = ""
         _pending_goal = None
+        _goal_discussing = False
         # The last-request token measurement is now stale (the state it
         # measured is gone). Reset it so context_usage() falls back to the
         # standing projection — which recomputes from the cleared state and
@@ -3022,7 +3084,7 @@ async def reset_all_state():
     global _loaded_docs
     global _last_turn_scan_chars
     global _last_request_tokens, _last_request_system_tokens, _last_request_user_tokens
-    global _goal_onboarding, _awaiting_goal_field, _pending_goal
+    global _goal_onboarding, _awaiting_goal_field, _pending_goal, _goal_discussing
 
     from memory_manager import (
         get_current_memory,
@@ -3069,6 +3131,7 @@ async def reset_all_state():
         _goal_onboarding = False
         _awaiting_goal_field = ""
         _pending_goal = None
+        _goal_discussing = False
         _current_doc_file_id = ""
         _current_doc_file_name = ""
         _loaded_docs = []
@@ -3107,7 +3170,7 @@ async def unload_project():
     global _loaded_docs
     global _last_turn_scan_chars
     global _last_request_tokens, _last_request_system_tokens, _last_request_user_tokens
-    global _goal_onboarding, _awaiting_goal_field, _pending_goal
+    global _goal_onboarding, _awaiting_goal_field, _pending_goal, _goal_discussing
 
     from memory_manager import (
         get_current_memory,
@@ -3149,6 +3212,7 @@ async def unload_project():
         _goal_onboarding = False
         _awaiting_goal_field = ""
         _pending_goal = None
+        _goal_discussing = False
         _current_doc_file_id = ""
         _current_doc_file_name = ""
         _loaded_docs = []
