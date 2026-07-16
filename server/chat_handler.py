@@ -297,7 +297,7 @@ def get_project_file_counts() -> dict:
 
 
 def set_project_context(
-    doc: PaperDocument,
+    doc: Optional[PaperDocument],
     comments: list[ReviewerComment],
     images: dict[str, bytes] = None,
     source: str = "",
@@ -316,7 +316,7 @@ def set_project_context(
         _image_cache = images
     logger.info(
         "Project context set: %d sections, %d comments, %d images (source=%s, doc_file_id=%s)",
-        len(doc.sections),
+        len(doc.sections) if doc else 0,
         len(comments),
         len(_image_cache),
         source,

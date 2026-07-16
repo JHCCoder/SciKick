@@ -556,9 +556,12 @@ async function loadProject() {
       });
     }
 
-    // Download and process the manuscript + reviewer comments from Drive
-    showSystemMessage("📥 Downloading and processing manuscript... (this might take a minute)");
-    let manuscriptLoaded = false;
+    // Examine the folder: list files, parse a clear manuscript if present,
+    // and otherwise parse whatever supporting/comment docs are there. A missing
+    // manuscript is a normal state (empty folder, or a non-manuscript mode),
+    // not an error.
+    showSystemMessage("📥 Downloading and examining your folder… (this might take a minute)");
+    let projectLoadedFromServer = false;
     let loadData = null;
     try {
       const loadRes = await fetch(`${SERVER_URL}/drive/folder/${folderId}/load-context`, {
@@ -567,8 +570,8 @@ async function loadProject() {
       if (loadRes.ok) {
         loadData = await loadRes.json();
         // Best-effort: surface the folder breakdown, project summary, and
-        // manuscript status. Guarded so an older server (missing fields)
-        // can't break the load path.
+        // manuscript status (if any). Guarded so an older server (missing
+        // fields) can't break the load path.
         const fc = loadData.file_counts || {};
         const fcParts = [];
         if (fc.total != null) fcParts.push(`${fc.total} total`);
@@ -580,17 +583,17 @@ async function loadProject() {
         if (fc.miscellaneous) fcParts.push(`${fc.miscellaneous} miscellaneous`);
         const fcLine = fcParts.length ? `📊 **Files in project**: ${fcParts.join(" · ")}\n\n` : "";
         const summaryLine = loadData.summary ? `📝 **Project summary**: ${loadData.summary}\n\n` : "";
-        showSystemMessage(
-          fcLine +
-          summaryLine +
-          `📄 **Manuscript loaded**: ${loadData.manuscript.title || loadData.manuscript.name}\n` +
-          `Sections: ${loadData.manuscript.sections.join(", ")}\n` +
-          `Figures found: ${loadData.manuscript.figures.length}`
-        );
-        manuscriptLoaded = true;
+        const ms = loadData.manuscript;
+        const manuscriptLine = ms
+          ? `📄 **Manuscript loaded**: ${ms.title || ms.name}\n` +
+            `Sections: ${(ms.sections || []).join(", ")}\n` +
+            `Figures found: ${(ms.figures || []).length}`
+          : `📁 No single manuscript detected — I've examined the folder and parsed what's here. Paste paper text or scan a file when you want to go deeper.`;
+        showSystemMessage(fcLine + summaryLine + manuscriptLine);
+        projectLoadedFromServer = true;
       } else {
         const err = await loadRes.json().catch(() => ({ detail: "Failed to load context" }));
-        showSystemMessage(`⚠️ Could not auto-detect manuscript: ${err.detail}\n\nYou can still chat, but you'll need to paste your paper text directly.`);
+        showSystemMessage(`⚠️ Couldn't examine that folder: ${err.detail}`);
       }
     } catch (e) {
       showSystemMessage(`⚠️ Context loading warning: ${e.message}`);
@@ -609,9 +612,9 @@ async function loadProject() {
       // Non-fatal — context verification only.
     }
 
-    if (manuscriptLoaded) {
+    if (projectLoadedFromServer) {
       showSystemMessage(
-        "✅ **Ready.** I've got the lay of the land — ask me general questions about your project, or scan the document you're working on for more in-depth assistance."
+        "✅ **Ready.** I've got the lay of the land — ask me about your project, or scan a document for deeper help."
       );
     }
 

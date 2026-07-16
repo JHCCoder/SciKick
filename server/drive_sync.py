@@ -655,6 +655,7 @@ async def load_context(folder_id: str, force: bool = False):
         _loaded_docs,
         _project_docs,
         _project_summary,
+        _project_structure,
     )
 
     # 1. Initialise or retrieve memory
@@ -720,17 +721,27 @@ async def load_context(folder_id: str, force: bool = False):
         n = len(_loaded_docs)
         _loaded_docs.clear()
         logger.info("load-context: switched folder — cleared %d kept document(s)", n)
-    if not force and not new_ids and not changed_ids and _current_doc is not None and same_folder:
+    if (
+        not force
+        and not new_ids
+        and not changed_ids
+        and same_folder
+        and (_current_doc is not None or _project_structure)
+    ):
         logger.info("load-context: no files changed — skipping re-parse")
-        return {
-            "status": "unchanged",
-            "manuscript": {
+        if _current_doc is not None:
+            manuscript_payload = {
                 "name": _current_doc.title,
                 "title": _current_doc.title,
                 "sections": [s.heading for s in _current_doc.sections],
                 "figures": [f.filename for f in _current_doc.figures],
                 "full_text_length": len(_current_doc.full_text),
-            },
+            }
+        else:
+            manuscript_payload = None
+        return {
+            "status": "unchanged",
+            "manuscript": manuscript_payload,
             "comments": {
                 "count": len(_current_comments),
                 "by_reviewer": _count_by(_current_comments, "reviewer"),
@@ -758,26 +769,29 @@ async def load_context(folder_id: str, force: bool = False):
     if force or new_ids or changed_ids:
         _focused_file_cache.clear()
 
-    # 4. Find the manuscript
+    # 4. Find the manuscript. A clear manuscript is parsed and promoted to
+    # _current_doc as before — but if none is detected we no longer abort the
+    # load. The folder is still examined: comments, images, supporting/supplement
+    # docs, the file index, and the project summary all run with doc=None, and
+    # the response carries manuscript: null. This makes a missing manuscript a
+    # normal state (empty folder, or a non-manuscript mode like grant/brainstorm)
+    # instead of an error.
     manuscript_file = _find_manuscript(all_files)
-    if manuscript_file is None:
-        raise HTTPException(
-            status_code=400,
-            detail="No manuscript found. Looked for PDF, DOCX, or Google Doc files.",
-        )
+    doc: Optional[PaperDocument] = None
+    ms_id = manuscript_file["id"] if manuscript_file else None
+    name = manuscript_file["name"] if manuscript_file else (memory.project_folder_name or "Project")
 
-    ms_id = manuscript_file["id"]
-    doc: PaperDocument
-    name = manuscript_file["name"]
-
-    if not force and ms_id not in new_ids and ms_id not in changed_ids and _current_doc is not None:
-        # Manuscript unchanged — reuse existing parsed document
-        doc = _current_doc
-        logger.info("load-context: manuscript unchanged, reusing cached parse")
+    if manuscript_file is not None:
+        if not force and ms_id not in new_ids and ms_id not in changed_ids and _current_doc is not None:
+            # Manuscript unchanged — reuse existing parsed document
+            doc = _current_doc
+            logger.info("load-context: manuscript unchanged, reusing cached parse")
+        else:
+            logger.info("load-context: parsing manuscript '%s' (%s)", name, manuscript_file["mimeType"])
+            manuscript_content = await download_file(ms_id)
+            doc = _parse_downloaded(manuscript_file, manuscript_content)
     else:
-        logger.info("load-context: parsing manuscript '%s' (%s)", name, manuscript_file["mimeType"])
-        manuscript_content = await download_file(ms_id)
-        doc = _parse_downloaded(manuscript_file, manuscript_content)
+        logger.info("load-context: no manuscript detected — examining folder contents only")
 
     # 5. Find and extract reviewer comments (only from changed/new files)
     comments: list[ReviewerComment] = []
@@ -904,32 +918,41 @@ async def load_context(folder_id: str, force: bool = False):
     set_project_docs(extra_docs)
     logger.info("load-context: parsed %d non-manuscript text file(s)", len(extra_docs))
 
-    # 7.6 Best-effort project summary (≤2 sentences) from the manuscript title
-    # + a small sample of each parsed file. Times out / falls back to the title
-    # so this can never block or fail the load.
-    summary_text = doc.title or name
-    try:
-        from memory_digest import generate_project_summary
-        samples = [(d["name"], d["doc"].full_text[:1500]) for d in extra_docs]
-        # Lead with the manuscript excerpt so the summary reflects the main text.
-        samples.insert(0, (name, doc.full_text[:1500]))
-        summary_text = await asyncio.wait_for(
-            generate_project_summary(doc.title or name, samples), timeout=30
-        )
-        logger.info("load-context: project summary: %s", summary_text[:200])
-    except asyncio.TimeoutError:
-        logger.warning("load-context: summary timed out — using title fallback")
-        summary_text = doc.title or name
-    except Exception as exc:
-        logger.warning("load-context: summary failed (%s) — using title fallback", exc)
-        summary_text = doc.title or name
+    # 7.6 Best-effort project summary (≤2 sentences). Normally led by the
+    # manuscript title + a small sample of each parsed file; when there's no
+    # manuscript, inferred from the parsed supporting/supplement docs (or a
+    # neutral default for a truly empty folder). Times out / falls back so it
+    # can never block or fail the load.
+    fallback_title = (doc.title if doc else None) or name
+    if doc is None and not extra_docs:
+        # Empty folder (no manuscript, nothing parseable) — skip the LLM call.
+        summary_text = f"{name}: no documents found yet — paste text or scan a file to begin."
+    else:
+        summary_text = fallback_title
+        try:
+            from memory_digest import generate_project_summary
+            samples = [(d["name"], d["doc"].full_text[:1500]) for d in extra_docs]
+            # Lead with the manuscript excerpt so the summary reflects the main text.
+            if doc is not None:
+                samples.insert(0, (name, doc.full_text[:1500]))
+            summary_text = await asyncio.wait_for(
+                generate_project_summary(fallback_title, samples), timeout=30
+            )
+            logger.info("load-context: project summary: %s", summary_text[:200])
+        except asyncio.TimeoutError:
+            logger.warning("load-context: summary timed out — using title fallback")
+            summary_text = fallback_title
+        except Exception as exc:
+            logger.warning("load-context: summary failed (%s) — using title fallback", exc)
+            summary_text = fallback_title
     set_project_summary(summary_text)
 
     # 8. Update memory with paper sections, comment states, and file snapshots
-    update_paper_sections([
-        {"heading": s.heading, "content": s.content}
-        for s in doc.sections
-    ])
+    if doc is not None:
+        update_paper_sections([
+            {"heading": s.heading, "content": s.content}
+            for s in doc.sections
+        ])
 
     # Only update comments if we re-parsed
     if changed_comment_files or force:
@@ -962,14 +985,18 @@ async def load_context(folder_id: str, force: bool = False):
         "files_changed": len(changed_ids) + len(new_ids),
         "files_skipped": len(unchanged_ids),
         "goal": goal_payload(),
-        "manuscript": {
-            "name": name,
-            "title": doc.title,
-            "sections": [s.heading for s in doc.sections],
-            "figures": [f.filename for f in doc.figures],
-            "full_text_length": len(doc.full_text),
-            "reused": not force and ms_id not in new_ids and ms_id not in changed_ids and _current_doc is not None,
-        },
+        "manuscript": (
+            {
+                "name": name,
+                "title": doc.title,
+                "sections": [s.heading for s in doc.sections],
+                "figures": [f.filename for f in doc.figures],
+                "full_text_length": len(doc.full_text),
+                "reused": not force and ms_id not in new_ids and ms_id not in changed_ids and _current_doc is not None,
+            }
+            if doc is not None
+            else None
+        ),
         "comments": {
             "count": len(comments),
             "by_reviewer": _count_by(comments, "reviewer"),
@@ -981,7 +1008,7 @@ async def load_context(folder_id: str, force: bool = False):
         "summary": summary_text,
         "file_counts": get_project_file_counts(),
         "parsed_files": {
-            "manuscript": 1,
+            "manuscript": 1 if doc is not None else 0,
             "comments": len(comment_files),
             "supplement": sum(1 for d in extra_docs if d["type"] == "supplement"),
             "supporting": sum(1 for d in extra_docs if d["type"] == "supporting"),
