@@ -106,17 +106,85 @@ def parse_pdf(content: bytes, filename: str) -> PaperDocument:
 # DOCX processing
 # ---------------------------------------------------------------------------
 
-# A figure-caption paragraph: an optional "Supplementary"/"Suppl." prefix,
-# then "Figure"/"Fig."/"Fig", a label like "1", "S1", or "S18ex", and a
-# delimiter (period/colon/dash/paren). The delimiter weeds out mid-sentence
-# references such as "Figure 1 shows..." so we count real captions, not
-# in-text mentions. DOCX has no reliable embedded-image→caption link, so we
-# key figures by their caption label instead of by image blob.
+# A figure-caption paragraph: an optional prefix (Supplemental/Supplementary/
+# Suppl./Supp./Extended Data), then "Figure"/"Fig.", a label token, and a
+# delimiter (period/colon/dash/paren). The label token is broad — "1", "S1",
+# "S18ex", "1A" — so any "Figure <label>." style is counted; the figure NUMBER
+# inside the label (extracted separately) is what we use for ordering and
+# same-figure dedup, not the label string itself. The delimiter weeds out
+# mid-sentence references such as "Figure 1 shows..." so we count real
+# captions, not in-text mentions. DOCX has no reliable embedded-image→caption
+# link, so we key figures by their caption label instead of by image blob.
+# Group 1 = prefix (for family detection), group 2 = label token.
 _FIGURE_CAPTION_RE = re.compile(
-    r"^\s*(?:Supplementary\s+|Suppl\.?\s+|Supp\.?\s+)?"
-    r"(?:Figure|Fig\.?)\s+((?:S)?\d+[a-zA-Z]*)\s*[.:)\-–—]",
+    r"^\s*"
+    r"((?:Supplemental|Supplementary|Suppl\.?|Supp\.?|Extended\s+Data)\s+)?"
+    r"(?:Figure|Fig\.?)\s+"
+    r"([A-Za-z]?\d+[A-Za-z0-9]*)\s*"
+    r"[.:)\-–—]",
     re.IGNORECASE,
 )
+
+
+def _figure_number(label_token: str) -> Optional[int]:
+    """Extract the leading integer from a figure label token.
+
+    "S18ex" → 18, "1A" → 1, "S1" → 1, "20" → 20. Used to order figures and to
+    spot that "Figure S1" (index) and "Figure 1" (body) are the same figure.
+    """
+    m = re.search(r"\d+", label_token)
+    return int(m.group()) if m else None
+
+
+def _figure_family(prefix: Optional[str]) -> str:
+    """Coarse caption family: "supp" (Supplemental/Supplementary), "ext"
+    (Extended Data), or "main" (no prefix). Two captions with the same figure
+    NUMBER but different families are NOT the same figure — e.g. a main
+    "Figure 1" vs a "Supplementary Figure S1" — so family guards the dedup."""
+    if not prefix:
+        return "main"
+    p = prefix.lower()
+    if "extended" in p:
+        return "ext"
+    return "supp"
+
+
+def _dedupe_figures(raw: list[dict]) -> list[FigureInfo]:
+    """Collapse duplicate figure captions and order survivors by figure number.
+
+    Supplemental files commonly open with an index that re-lists every figure
+    by title, then repeat each caption in the body (sometimes with its full
+    legend). The two copies often use different labels AND different title
+    wording — "Supplemental Figure S2. Hi-C maps of scaffolds." in the index
+    vs "Supplemental Figure 2. Hi-C contact maps of the assembly…" in the body
+    — so neither label nor caption-text similarity reliably connects them. The
+    one stable signal is the figure NUMBER, so we treat two captions as the
+    SAME figure when they share the same number AND family (both Supplemental,
+    both Extended Data, or both plain main-text figures), and keep the longest
+    caption (the legend-bearing body copy). Family prevents merging a main
+    "Figure 1" with a "Supplementary Figure S1" that happens to share number 1.
+    Survivors are ordered by figure number so the list follows figure order
+    regardless of how labels were formatted.
+    """
+    kept: list[dict] = []
+    for e in raw:
+        dup_of = None
+        for k in kept:
+            if (k["num"] is not None and k["family"] == e["family"]
+                    and k["num"] == e["num"]):
+                dup_of = k
+                break
+        if dup_of is None:
+            kept.append(e)
+        elif len(e["desc"]) > len(dup_of["desc"]):
+            # Replace with the richer caption but preserve the earlier
+            # position so final ordering stays stable.
+            e["idx"] = dup_of["idx"]
+            kept[kept.index(dup_of)] = e
+        # else: a shorter duplicate of an already-kept caption → drop.
+    kept.sort(key=lambda e: (e["num"] if e["num"] is not None else float("inf"), e["idx"]))
+    return [FigureInfo(filename=f"Figure {e['label']}", caption=e["caption"]) for e in kept]
+
 
 
 def parse_docx(content: bytes, filename: str) -> PaperDocument:
@@ -175,36 +243,53 @@ def parse_docx(content: bytes, filename: str) -> PaperDocument:
     full_text_parts = []
     n_paragraphs = 0
     n_tables = 0
-    seen_fig_labels: set[str] = set()
-    all_figures: list[FigureInfo] = []
+    # Collect every figure-caption paragraph; dedup happens after the loop so
+    # we can compare an index entry against the body caption of the same figure
+    # and keep the richer (legend-bearing) copy.
+    raw_figures: list[dict] = []
     for block in iter_block_items(docx):
         if isinstance(block, Paragraph):
             text = block.text
-            full_text_parts.append(text)
             n_paragraphs += 1
-            # Detect figure-caption paragraphs (deduped by label).
+            # Detect figure-caption paragraphs. The label token (e.g. "1",
+            # "S1", "S18ex", "1A") carries the figure number used for ordering
+            # and same-figure dedup; the prefix drives the caption family so a
+            # main "Figure 1" is never merged with a "Supplementary Figure S1".
             m = _FIGURE_CAPTION_RE.match(text)
             if m:
-                label = f"Figure {m.group(1)}"
-                key = label.lower()
-                if key not in seen_fig_labels:
-                    seen_fig_labels.add(key)
-                    all_figures.append(
-                        FigureInfo(filename=label, caption=text.strip())
-                    )
+                prefix, label_token = m.group(1), m.group(2)
+                raw_figures.append({
+                    "label": label_token,
+                    "desc": text[m.end():].strip().lower(),
+                    "num": _figure_number(label_token),
+                    "family": _figure_family(prefix),
+                    "idx": len(raw_figures),
+                    "caption": text.strip(),
+                })
+            # Drop whitespace-only paragraphs. DOCX represents embedded images
+            # and layout spacing as empty paragraphs; left in, they become long
+            # runs of blank lines that look like "missing content" (e.g. a
+            # figure title followed by a blank wall) and mislead the LLM into
+            # thinking legends/captions are absent. Dropping them keeps a
+            # figure caption attached to the legend text that follows it.
+            if text and text.strip():
+                full_text_parts.append(text)
         elif isinstance(block, Table):
             rendered = table_to_text(block)
             if rendered:
                 full_text_parts.append(rendered)
                 n_tables += 1
 
-    doc.full_text = "\n\n".join(full_text_parts)
-    doc.figures = all_figures
+    # Collapse any residual runs of 3+ newlines (e.g. multi-line table cells
+    # that reduced to blank lines) to a single blank line, so the extracted
+    # text never presents an image-gap as a wall of empty space.
+    doc.full_text = re.sub(r"\n{3,}", "\n\n", "\n\n".join(full_text_parts))
+    doc.figures = _dedupe_figures(raw_figures)
     doc.sections = _parse_sections(doc.full_text)
     doc.title, doc.abstract, doc.authors = _extract_metadata(doc.full_text)
 
-    logger.info("Parsed DOCX '%s': %d paragraphs, %d tables, %d sections, %d figures",
-                 filename, n_paragraphs, n_tables, len(doc.sections), len(all_figures))
+    logger.info("Parsed DOCX '%s': %d paragraphs, %d tables, %d sections, %d figures (%d before dedup)",
+                 filename, n_paragraphs, n_tables, len(doc.sections), len(doc.figures), len(raw_figures))
     return doc
 
 

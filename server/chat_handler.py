@@ -376,6 +376,8 @@ You are powered by an LLM that the user configured in the ⚙ Settings panel. At
 
 ## Important
 - Never fabricate citations, references, or data that aren't in the paper or user-provided feedback.
+- **Never fabricate document content.** When you reference text from a loaded/kept document (the "## Loaded Documents" block), the manuscript, reviewer comments, or any scraped article, it must come from text actually present there — quote it or paraphrase it closely. Do NOT invent figure titles, figure legends, panel descriptions, section headings, captions, tables, or data values that you cannot locate in the provided text. If a figure or section exists only as an embedded image, its visual content is NOT available to you — say so, rather than guessing what it depicts.
+- **If you cannot find specific content the user asks about** (a figure legend, a section, a value, a caption), say so plainly: "I don't see X in the loaded document." Do NOT claim the content is blank, missing, or "not filled in yet" unless you have scanned the entire provided text and confirmed the absence by quoting what IS there. A long run of blank lines in the extracted text almost always means an embedded image or layout spacing was stripped during extraction — it does NOT mean text is missing. Search the rest of the document (including later sections) before concluding any content is absent.
 - If you're unsure about a domain-specific detail, flag it rather than guess — the user is the expert in their field.
 - The user is the domain expert; your job is to help them express their expertise clearly and persuasively.
 - Respect the journal's scope and the reviewers' legitimate concerns — don't suggest dismissing valid criticism.
@@ -1995,7 +1997,11 @@ def _build_user_message(
             "list is the source of truth for what is loaded right now. They "
             "stay available across turns until the user asks to remove them or "
             "the server restarts. Treat their text as source material alongside "
-            "the manuscript.\n"
+            "the manuscript. IMPORTANT: only quote/paraphrase text that is "
+            "actually present below — never invent figure titles, legends, or "
+            "captions. Long runs of blank lines are stripped embedded images, "
+            "NOT missing text; scan the whole file before claiming any content "
+            "is absent, and if you truly can't find it, say so honestly.\n"
         )
         cap = _doc_char_budget(0.25)  # kept docs are resent every turn — smaller share
         for d in _loaded_docs:
