@@ -892,7 +892,7 @@ function showOnboardingOptions() {
 
   const bubble = document.createElement("div");
   bubble.className = "message-content";
-  bubble.innerHTML = renderMarkdown("So what would you like to work on today?");
+  bubble.innerHTML = renderMarkdown("Welcome to SciKick, I'm your AI research companion. I'm here to bounce around ideas or help with your writing. So what would you like to work on today?");
 
   const btnRow = document.createElement("div");
   btnRow.className = "onboarding-buttons";
