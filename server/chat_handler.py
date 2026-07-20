@@ -2861,7 +2861,7 @@ async def context_usage():
         "scraped_papers_count": len(_scraped_docs),
         "scraped_total_chars": sum(len(doc.full_text) for doc in _scraped_docs),
         "loaded_docs_count": len(_loaded_docs),
-        "loaded_docs": [{"name": d["name"], "chars": len(d["text"])} for d in _loaded_docs],
+        "loaded_docs": [{"name": d["name"], "chars": len(d["text"]), "file_id": d["file_id"]} for d in _loaded_docs],
         "project_docs_count": len(_project_docs),
         "project_docs": [
             {"name": d["name"], "type": d["type"], "chars": len(d["doc"].full_text)}
@@ -3027,7 +3027,7 @@ async def get_context():
         "comments": comments,
         "images": images,
         "scraped_papers": scraped_papers,
-        "loaded_docs": [{"name": d["name"], "chars": len(d["text"])} for d in _loaded_docs],
+        "loaded_docs": [{"name": d["name"], "chars": len(d["text"]), "file_id": d["file_id"]} for d in _loaded_docs],
         "project_summary": _project_summary,
         "project_docs": [
             {"name": d["name"], "type": d["type"], "chars": len(d["doc"].full_text)}
@@ -3060,9 +3060,22 @@ async def list_scraped():
 
 
 @router.delete("/scraped")
-async def clear_scraped(index: int = None):
-    """Clear scraped papers. Pass ?index=N to remove one, or omit to clear all."""
+async def clear_scraped(index: int = None, url: str = None):
+    """Clear scraped papers.
+
+    Remove one by ?index=N (matches the order shown in the Loaded Data panel)
+    or by ?url=... (stable across reorders, used by the scrape/unload button
+    in the tab bar); omit both to clear all.
+    """
     global _scraped_docs, _scraped_sources
+    if url:
+        for i, src in enumerate(_scraped_sources):
+            if src == url:
+                removed = _scraped_docs.pop(i)
+                _scraped_sources.pop(i)
+                logger.info("Scraped: removed '%s' by url; %d remaining", removed.title, len(_scraped_docs))
+                return {"status": "removed", "title": removed.title, "remaining": len(_scraped_docs)}
+        raise HTTPException(status_code=404, detail=f"No scraped paper for url {url}")
     if index is not None:
         if 0 <= index < len(_scraped_docs):
             removed = _scraped_docs.pop(index)
@@ -3072,6 +3085,35 @@ async def clear_scraped(index: int = None):
     count = len(_scraped_docs)
     _scraped_docs = []
     _scraped_sources = []
+    return {"status": "cleared", "removed": count}
+
+
+@router.delete("/loaded-docs")
+async def remove_loaded_doc(index: int = None, file_id: str = None):
+    """Drop a kept document from the loaded-documents set.
+
+    Remove one by ?index=N (matches the order shown in the Loaded Data panel)
+    or by ?file_id=... (stable across reorders, used by the scan/unload button
+    in the tab bar); omit both to clear all. The text is only re-injected on
+    the next turn, so removing here takes effect immediately for subsequent
+    messages.
+    """
+    global _loaded_docs
+    if file_id:
+        if _remove_loaded_doc_by_id(file_id):
+            return {"status": "removed", "file_id": file_id, "remaining": len(_loaded_docs)}
+        raise HTTPException(status_code=404, detail=f"No loaded document with file_id {file_id}")
+    if index is not None:
+        if 0 <= index < len(_loaded_docs):
+            removed = _loaded_docs.pop(index)
+            logger.info(
+                "Loaded-docs: removed '%s'; %d remaining", removed["name"], len(_loaded_docs)
+            )
+            return {"status": "removed", "name": removed["name"], "remaining": len(_loaded_docs)}
+        raise HTTPException(status_code=404, detail=f"No loaded document at index {index}")
+    count = len(_loaded_docs)
+    _loaded_docs = []
+    logger.info("Loaded-docs: cleared all (%d removed)", count)
     return {"status": "cleared", "removed": count}
 
 

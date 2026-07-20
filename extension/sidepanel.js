@@ -1285,7 +1285,7 @@ async function loadInfoPanel() {
     html += '<div class="info-section-title">🌐 Scraped Articles</div>';
     html += `<div class="info-row"><span class="info-label">Count</span><span class="info-value">${ctxRes.scraped_papers.length}</span></div>`;
     ctxRes.scraped_papers.forEach((sp, i) => {
-      html += `<div class="info-row"><span class="info-label">#${i + 1}</span><span class="info-value">${escHtml(sp.title || "Untitled")}</span><button class="info-delete info-delete-scrape" data-index="${i}" title="Remove this article">✕</button></div>`;
+      html += `<div class="info-row"><span class="info-label">#${i + 1}</span><span class="info-value">${escHtml(sp.title || "Untitled")}</span><button class="info-delete info-delete-scrape" data-index="${i}" title="Unload this page from context">✕</button></div>`;
       html += `<div class="info-row"><span class="info-label">Size</span><span class="info-value">${formatSize(sp.full_text_length || 0)}</span></div>`;
     });
     html += '</div>';
@@ -1298,10 +1298,10 @@ async function loadInfoPanel() {
     html += '<div class="info-section-title">📌 Loaded Documents</div>';
     html += `<div class="info-row"><span class="info-label">Count</span><span class="info-value">${ctxRes.loaded_docs.length}</span></div>`;
     ctxRes.loaded_docs.forEach((d, i) => {
-      html += `<div class="info-row"><span class="info-label">#${i + 1}</span><span class="info-value">${escHtml(d.name || "Untitled")}</span></div>`;
+      html += `<div class="info-row"><span class="info-label">#${i + 1}</span><span class="info-value">${escHtml(d.name || "Untitled")}</span><button class="info-delete info-unload-doc" data-index="${i}" title="Unload this file from context">✕</button></div>`;
       html += `<div class="info-row"><span class="info-label">Size</span><span class="info-value">${formatSize(d.chars || 0)}</span></div>`;
     });
-    html += `<div class="info-row"><span class="info-label">Tip</span><span class="info-value">Say “remove this document” or “clear all loaded documents” to drop one.</span></div>`;
+    html += `<div class="info-row"><span class="info-label">Tip</span><span class="info-value">Click ✕ to unload a file from context.</span></div>`;
     html += '</div>';
   }
 
@@ -1721,8 +1721,10 @@ function updateTabBar(tab) {
         dom.tabTitle.textContent = `Viewing: ${match.name}`;
         dom.tabBar.classList.add("viewing-project-file");
         viewingFile = { name: match.name, id: match.id };
-        // Offer a one-click scan & keep of the file being viewed.
-        dom.btnScanTab.classList.remove("hidden");
+        // Offer a one-click scan & keep of the file being viewed — or, if it's
+        // already kept in context, an unload button routing to the same
+        // mechanism as the ✕ in the Loaded Data panel.
+        refreshScanButtonState();
       } else {
         dom.tabIcon.textContent = "📄";
         dom.tabTitle.textContent = tab.title || "Untitled";
@@ -1730,15 +1732,16 @@ function updateTabBar(tab) {
       }
     }
   } else {
-    // Non-Drive webpage — offer to scrape it as a paper
+    // Non-Drive webpage — offer to scrape it as a paper, or unload it if
+    // this page is already scraped (same mechanism as the ✕ in the Loaded
+    // Data panel).
     dom.tabIcon.textContent = "🌐";
     dom.tabBar.classList.remove("drive-tab", "viewing-project-file");
     currentTabUrl = tab.url;
-    dom.btnUseTab.classList.remove("hidden");
-    dom.btnUseTab.textContent = "Scrape this page";
     delete dom.btnUseTab.dataset.folderId;
     dom.btnUseTab.dataset.scrapeUrl = tab.url;
     dom.tabTitle.textContent = tab.title || "Untitled";
+    refreshScrapeButtonState();
   }
 
   dom.tabDomain.textContent = domainLabel(tab.url);
@@ -1773,13 +1776,85 @@ async function detectCurrentTab(retries = 3) {
   viewingFile = null;
 }
 
+/**
+ * Refresh the scan/unload button for the file currently viewed in the tab.
+ * If the file is already kept in the loaded-documents set, the button becomes
+ * an "Unload" action; otherwise it stays "Scan". Routes to the same
+ * /chat/loaded-docs endpoint as the ✕ button in the Loaded Data panel.
+ */
+async function refreshScanButtonState() {
+  if (!viewingFile || !viewingFile.id) {
+    dom.btnScanTab.classList.add("hidden");
+    return;
+  }
+  let kept = false;
+  try {
+    const res = await fetch(`${SERVER_URL}/chat/context`);
+    if (res.ok) {
+      const data = await res.json();
+      kept = (data.loaded_docs || []).some(d => d.file_id === viewingFile.id);
+    }
+  } catch (err) { /* ignore — default to scan mode */ }
+  if (kept) {
+    dom.btnScanTab.textContent = "📤 Unload";
+    dom.btnScanTab.title = "Unload this file from context";
+    dom.btnScanTab.dataset.kept = "true";
+  } else {
+    dom.btnScanTab.textContent = "📌 Scan";
+    dom.btnScanTab.title = "Scan & keep this file in context";
+    dom.btnScanTab.dataset.kept = "false";
+  }
+  dom.btnScanTab.classList.remove("hidden");
+}
+
+/**
+ * Refresh the scrape/unload button for the page currently viewed in the tab.
+ * If the page is already scraped into context, the button becomes an "Unload
+ * page" action; otherwise it stays "Scrape this page". Routes to the same
+ * /chat/scraped endpoint as the ✕ button in the Loaded Data panel.
+ */
+async function refreshScrapeButtonState() {
+  const scrapeUrl = dom.btnUseTab.dataset.scrapeUrl;
+  if (!scrapeUrl) return; // not in scrape mode
+  let scraped = false;
+  try {
+    const res = await fetch(`${SERVER_URL}/chat/context`);
+    if (res.ok) {
+      const data = await res.json();
+      scraped = (data.scraped_papers || []).some(p => p.url && p.url === scrapeUrl);
+    }
+  } catch (err) { /* ignore — default to scrape mode */ }
+  if (scraped) {
+    dom.btnUseTab.textContent = "📤 Unload page";
+    dom.btnUseTab.title = "Unload this page from context";
+    dom.btnUseTab.dataset.kept = "true";
+  } else {
+    dom.btnUseTab.textContent = "Scrape this page";
+    dom.btnUseTab.title = "Scrape this page as a paper";
+    dom.btnUseTab.dataset.kept = "false";
+  }
+  dom.btnUseTab.classList.remove("hidden");
+}
+
 /** Wire up the tab action button (load folder or scrape page) */
 function initTabBar() {
-  // One-click scan & keep of the file currently viewed in the browser tab.
-  dom.btnScanTab.addEventListener("click", () => {
-    if (!viewingFile || !viewingFile.name) return;
+  // One-click scan & keep of the file currently viewed in the browser tab —
+  // or unload it if it's already kept in context (same mechanism as the ✕
+  // button in the Loaded Data panel).
+  dom.btnScanTab.addEventListener("click", async () => {
+    if (!viewingFile || !viewingFile.id) return;
+    if (dom.btnScanTab.dataset.kept === "true") {
+      // Already in context — unload it via the loaded-docs endpoint.
+      try {
+        await fetch(`${SERVER_URL}/chat/loaded-docs?file_id=${encodeURIComponent(viewingFile.id)}`, { method: "DELETE" });
+      } catch (err) { /* ignore */ }
+      refreshScanButtonState();
+      return;
+    }
     dom.chatInput.value = `scan and keep ${viewingFile.name} in context`;
-    sendMessage();
+    await sendMessage();
+    // Scanning may have just added the file to context — refresh the label.
+    refreshScanButtonState();
   });
 
   dom.btnUseTab.addEventListener("click", async () => {
@@ -1792,9 +1867,20 @@ function initTabBar() {
       return;
     }
 
-    // "Scrape this page" mode
+    // "Scrape this page" / "Unload page" mode
     const scrapeUrl = dom.btnUseTab.dataset.scrapeUrl;
     if (scrapeUrl) {
+      // Already scraped — unload it via the scraped-papers endpoint.
+      if (dom.btnUseTab.dataset.kept === "true") {
+        try {
+          await fetch(`${SERVER_URL}/chat/scraped?url=${encodeURIComponent(scrapeUrl)}`, { method: "DELETE" });
+        } catch (err) { /* ignore */ }
+        updateContextUsage();
+        if (!dom.infoPanel.classList.contains("hidden")) loadInfoPanel();
+        refreshScrapeButtonState();
+        return;
+      }
+
       dom.btnUseTab.disabled = true;
       dom.btnUseTab.textContent = "Scraping...";
       loadingInProgress = true;
@@ -1863,7 +1949,9 @@ function initTabBar() {
       } finally {
         loadingInProgress = false;
         dom.btnUseTab.disabled = false;
-        dom.btnUseTab.textContent = "Scrape this page";
+        // Scrape may have just added the page to context — refresh the label
+        // (flips to "Unload page" on success, stays "Scrape this page" on error).
+        refreshScrapeButtonState();
       }
     }
   });
@@ -2008,6 +2096,22 @@ async function init() {
             await fetch(`${SERVER_URL}/chat/scraped?index=${idx}`, { method: "DELETE" });
           } catch (err) { /* ignore */ }
           loadInfoPanel();
+          // Keep the tab-bar scrape/unload label in sync with the change.
+          refreshScrapeButtonState();
+        }
+      }
+
+      // --- Unload a kept document from context ---
+      const unloadDocBtn = e.target.closest(".info-unload-doc");
+      if (unloadDocBtn) {
+        const idx = unloadDocBtn.dataset.index;
+        if (idx != null) {
+          try {
+            await fetch(`${SERVER_URL}/chat/loaded-docs?index=${idx}`, { method: "DELETE" });
+          } catch (err) { /* ignore */ }
+          loadInfoPanel();
+          // Keep the tab-bar scan/unload label in sync with the change.
+          refreshScanButtonState();
         }
       }
 

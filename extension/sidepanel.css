@@ -737,6 +737,7 @@ body {
 .message-content p:last-child { margin-bottom: 0; }
 .message-content ul, .message-content ol { margin: 6px 0 6px 20px; }
 .message-content ul.no-bullet { list-style: none; margin-left: 0; padding-left: 0; }
+.message.system .message-content.static-welcome { text-align: left; }
 .message-content li { margin-bottom: 3px; }
 .message-content code {
   background: var(--bg-primary);
