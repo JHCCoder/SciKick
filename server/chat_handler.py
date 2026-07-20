@@ -2662,11 +2662,25 @@ async def list_providers():
         } if current else None,
         "available": [
             {
+                "id": "openai",
+                "name": "OpenAI (GPT)",
+                "sdk": "OpenAI SDK",
+                "models": "gpt-4o, gpt-4-turbo, gpt-3.5-turbo, etc.",
+                "env_vars": "LLM_API_KEY or OPENAI_API_KEY",
+            },
+            {
                 "id": "anthropic",
                 "name": "Anthropic (Claude)",
                 "sdk": "Anthropic SDK",
                 "models": "claude-sonnet-4-6, claude-opus-4-8, claude-haiku-4-5, etc.",
                 "env_vars": "LLM_API_KEY or ANTHROPIC_API_KEY",
+            },
+            {
+                "id": "gemini",
+                "name": "Google (Gemini)",
+                "sdk": "OpenAI-compatible",
+                "models": "gemini-2.0-flash, gemini-2.5-flash, gemini-2.5-pro",
+                "env_vars": "LLM_API_KEY or GEMINI_API_KEY",
             },
             {
                 "id": "deepseek",
@@ -2681,20 +2695,6 @@ async def list_providers():
                 "sdk": "OpenAI-compatible",
                 "models": "glm-4-plus, glm-4-flash, glm-4-long, glm-4-air",
                 "env_vars": "LLM_API_KEY or GLM_API_KEY",
-            },
-            {
-                "id": "openai",
-                "name": "OpenAI (GPT)",
-                "sdk": "OpenAI SDK",
-                "models": "gpt-4o, gpt-4-turbo, gpt-3.5-turbo, etc.",
-                "env_vars": "LLM_API_KEY or OPENAI_API_KEY",
-            },
-            {
-                "id": "gemini",
-                "name": "Google (Gemini)",
-                "sdk": "OpenAI-compatible",
-                "models": "gemini-2.0-flash, gemini-2.5-flash, gemini-2.5-pro",
-                "env_vars": "LLM_API_KEY or GEMINI_API_KEY",
             },
             {
                 "id": "kimi",
