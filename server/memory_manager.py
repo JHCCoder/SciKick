@@ -435,6 +435,29 @@ _APP_TYPE_LABELS = {
 }
 
 
+# Governing workflow for paper-revision mode. Injected into the system prompt
+# every turn so it always governs how the revision is organized — especially
+# when the user asks where to start or for an execution plan. The order is by
+# DEPENDENCY, not by how easy each task is.
+#
+# NOTE: keep this as sequencing GUIDANCE only — prose that tells the model the
+# order in which to think and act. Do NOT instruct the model to construct an
+# artifact (e.g. "build a tracker", "create a table") as a first step. Such
+# action instructions force a large structured output up front, which on some
+# providers (notably DeepSeek) blows past the max_tokens cap mid-stream and
+# surfaces as an API error instead of a clean truncation.
+_REVISION_WORKFLOW_BLOCK = """## Revision Workflow (governing)
+When the user asks where to start, for an execution plan, or how to organize the revision, follow this dependency-ordered workflow. Triage the reviewer comments by what each requires (an analysis that could change the results, vs. a prose-only change) so you can sequence them below — do this in your reasoning, not as a separate deliverable. Do NOT order tasks by how easy they are — analyses that may change the results must come before prose that those analyses could force you to rewrite.
+
+1. **Scientific and analytical issues first.** Resolve every scientific and analytical issue that could change the results, interpretation, figures, datasets, or conclusions. Finalize these decisions before touching prose.
+2. **Figures/supplements, then manuscript sections in order.** Once those decisions are finalized, update the figures and supplements, then revise the manuscript in this order: Methods and Results → Discussion → Introduction → Abstract and title.
+3. **Consistency audit.** After the scientific content is stable, audit all numbers, terminology, figure references, methods, and claims for consistency.
+4. **Rebuttal responses alongside revisions.** Draft each rebuttal response alongside its corresponding revision, but add final page and line numbers only after the manuscript is complete.
+5. **Cosmetics last.** Leave cosmetic formatting, file naming, figure numbering, reference styling, nomenclature checks, grammar polishing, and submission packaging until the very end — except for structural journal requirements that must be known in advance.
+
+Do not prioritize formatting or minor wording changes ahead of analyses that may later require those sections to be rewritten."""
+
+
 def goal_block(goal: "GoalState") -> str:
     """Render a GoalState as a markdown block for the system prompt / resume
     context. Shows the mode and every populated mode-specific field, plus a
@@ -451,6 +474,12 @@ def goal_block(goal: "GoalState") -> str:
             lines.append("")
             lines.append("Author-guidelines notes (formatting):")
             lines.append(goal.journal_formatting)
+        if goal.mode == "paper_revision":
+            # Governing dependency-ordered revision workflow — see
+            # _REVISION_WORKFLOW_BLOCK. Applies to revision (responding to
+            # reviewer comments), not to fresh paper writing.
+            lines.append("")
+            lines.append(_REVISION_WORKFLOW_BLOCK)
         directive = (
             f"Tailor all revision/writing advice to {goal.journal or 'the target journal'}'s "
             "formatting conventions. If the notes above are empty or you are unsure of a "
