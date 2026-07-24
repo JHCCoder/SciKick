@@ -12,6 +12,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -129,15 +130,43 @@ def get_sheets_service() -> Optional[object]:
 
 
 def _load_credentials() -> Optional[Credentials]:
-    """Load saved credentials from disk, refreshing if possible."""
+    """Load saved credentials from disk, refreshing if possible.
+
+    Returns None (not authenticated) if there is no token, the token is
+    invalid, or a refresh attempt fails. A failed refresh must never raise —
+    /drive/auth/status polls this on every health check, and a revoked/expired
+    refresh token (``invalid_grant``) is a normal, recoverable state that
+    should surface to the user as "re-authorize", not a 500.
+    """
     if not Path(GOOGLE_TOKEN_FILE).exists():
         return None
 
     with open(GOOGLE_TOKEN_FILE, "rb") as token_f:
         creds = pickle.load(token_f)
     if isinstance(creds, Credentials) and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        _save_credentials(creds)
+        try:
+            creds.refresh(Request())
+            _save_credentials(creds)
+        except RefreshError as exc:
+            # invalid_grant (expired/revoked) is non-retryable — the refresh
+            # token is dead, so drop it and let the frontend re-trigger OAuth
+            # consent. Retryable errors (transient network/transport) leave
+            # the file in place for the next poll to retry.
+            if not getattr(exc, "retryable", False):
+                logger.warning(
+                    "Drive token refresh failed (invalid_grant); clearing stale "
+                    "token — re-authorize via /drive/auth/url. Detail: %s", exc
+                )
+                try:
+                    Path(GOOGLE_TOKEN_FILE).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            else:
+                logger.warning("Drive token refresh failed (retryable): %s", exc)
+            return None
+        except Exception as exc:  # network/transport hiccups — keep the token
+            logger.warning("Drive token refresh raised %s: %s", type(exc).__name__, exc)
+            return None
     return creds if isinstance(creds, Credentials) and creds.valid else None
 
 
