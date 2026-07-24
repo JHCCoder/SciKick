@@ -167,6 +167,32 @@ install_deps() {
     pip install -r "$SERVER_DIR/requirements.txt"
 
     echo -e "${GREEN}✓ Dependencies installed${NC}"
+
+    # Non-blocking hint: the base install is text-layer-only PDF parsing.
+    # Scanned/image-only PDF OCR is an optional, larger dependency group —
+    # the server degrades gracefully without it, so this is just a heads-up.
+    if [ "${_SCIKICK_QUIET_OCR_HINT:-0}" != "1" ]; then
+        echo -e "${YELLOW}Tip: scanned-PDF OCR is optional — run ${GREEN}./start.sh --ocr${YELLOW} to enable it.${NC}"
+    fi
+}
+
+# Install the optional OCR dependency group (PyMuPDF + RapidOCR + ONNX Runtime).
+# Enables the "Auto" PDF parsing tier: page-level OCR on scanned/image-only
+# pages. Without it, parse_pdf(mode="auto") degrades to text-layer-only (Fast)
+# and flags the unreadable pages for the UI to hint. Runnable while the server
+# is up — no restart needed for the install itself (reload the project after).
+install_ocr_deps() {
+    echo -e "${BLUE}Installing optional OCR dependencies...${NC}"
+    if [ ! -d "$VENV_DIR" ]; then
+        install_deps
+    else
+        source "$VENV_DIR/bin/activate"
+        pip install --upgrade pip
+    fi
+    # ~150 MB added (onnxruntime, rapidocr + bundled ONNX models, numpy, etc.).
+    pip install -r "$SERVER_DIR/requirements-ocr.txt"
+    echo -e "${GREEN}✓ OCR dependencies installed — 'Auto' PDF parsing is now available.${NC}"
+    echo -e "${YELLOW}Note: 'Deep' PDF parsing (Docling, ~1–2 GB) is not yet available.${NC}"
 }
 
 # Auto-create the GCP project and enable Drive + Sheets APIs when the gcloud CLI
@@ -1034,6 +1060,18 @@ case "${1:-}" in
         install_deps
         start_server
         ;;
+    --ocr)
+        # Optional OCR dependency group — enables Auto (scanned-page) PDF parsing.
+        # Runnable while the server is up; reload the project afterward to re-parse.
+        install_ocr_deps
+        ;;
+    --all)
+        # Base + OCR. Deep/Docling is deferred (not yet available).
+        # Silence the "--ocr" hint from install_deps since we're about to
+        # install OCR in the next step.
+        _SCIKICK_QUIET_OCR_HINT=1 install_deps
+        install_ocr_deps
+        ;;
     --setup)
         install_deps
         first_time_setup
@@ -1068,6 +1106,8 @@ case "${1:-}" in
         echo "Options:"
         echo "  (none)             Start the server"
         echo "  --install          Install dependencies, then start"
+        echo "  --ocr              Install optional OCR deps (scanned-PDF 'Auto' parsing)"
+        echo "  --all              Install base + OCR deps together"
         echo "  --setup            Setup wizard (Google Drive + background service)"
         echo "  --drive            Add Google Drive access (runnable while the server runs)"
         echo "  --install-service  Install as background service (auto-start on login)"

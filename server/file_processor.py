@@ -49,6 +49,15 @@ class PaperDocument:
     full_text: str = ""
     raw_format: str = "unknown"  # "pdf", "docx", "gdoc", "text"
 
+    # PDF parsing provenance (Tier 0/1 ladder). These are written by parse_pdf
+    # and currently read only for status/hint display — no downstream consumer
+    # depends on them, so older callers that never set them are unaffected.
+    parse_mode: str = "fast"  # "fast" | "auto" | "deep"
+    ocr_pages: list[int] = field(default_factory=list)  # 1-indexed pages OCR'd
+    ocr_deficient_pages: list[int] = field(default_factory=list)  # pages that needed OCR but didn't get it
+    figure_ocr_pages: list[int] = field(default_factory=list)  # pages whose embedded images were OCR'd
+    figure_ocr_count: int = 0  # number of embedded images OCR'd
+
 
 @dataclass
 class ReviewerComment:
@@ -67,24 +76,222 @@ class ReviewerComment:
 # PDF processing
 # ---------------------------------------------------------------------------
 
+# One parse cache for Phase 1 (decision 6): keyed by (content hash, mode,
+# parser version). Sits at the lowest parse level so both the manuscript path
+# (drive_sync) and the named-file scan path (chat_handler) benefit. Capped so a
+# long session doesn't accumulate every PDF ever opened.
+from collections import OrderedDict as _OrderedDict
 
-def parse_pdf(content: bytes, filename: str) -> PaperDocument:
-    """Extract text and figures from a PDF."""
+_PDF_PARSE_CACHE: "_OrderedDict[tuple[str, str, int], PaperDocument]" = _OrderedDict()
+_PDF_PARSE_CACHE_MAX = 16
+
+
+def _cache_key(content: bytes, mode: str) -> tuple[str, str, int]:
+    import hashlib
+
+    from config import PDF_PARSER_VERSION
+
+    return (hashlib.sha256(content).hexdigest()[:16], mode, PDF_PARSER_VERSION)
+
+
+def _native_text_is_deficient(text: str) -> bool:
+    """True when a page's native text layer is too thin/garbled to be useful.
+
+    Covers the cases OCR is meant to rescue: empty text (image-only / scanned
+    pages), very short text (figure pages with a stray caption fragment), and
+    garbled text (corrupted/CID-mapped fonts that decode to replacement chars).
+    """
+    from config import PDF_OCR_MIN_NATIVE_CHARS
+
+    if not text:
+        return True
+    stripped = text.strip()
+    if len(stripped) < PDF_OCR_MIN_NATIVE_CHARS:
+        return True
+    # Garbled: high ratio of null / replacement / control chars.
+    garbled = sum(
+        1 for c in text
+        if c in ('\x00', '�') or (ord(c) < 9 and c not in '\n\r\t')
+    )
+    return (garbled / max(len(text), 1)) > 0.3
+
+
+def _ocr_pages(content: bytes, page_indices_0: list[int]) -> dict[int, str]:
+    """OCR the given 0-indexed pages, returning {page_index_0: text or ""}.
+
+    Renders each page with PyMuPDF at PDF_OCR_RENDER_DPI and runs RapidOCR.
+    Any import/init/render/OCR failure yields "" for that page (caller treats
+    it as "not recovered"). All heavy imports are local so a missing OCR group
+    never breaks Tier 0.
+    """
+    from config import PDF_OCR_RENDER_DPI
+
+    out: dict[int, str] = {idx: "" for idx in page_indices_0}
+    try:
+        import fitz  # type: ignore
+        import numpy as np  # type: ignore
+
+        from pdf_capabilities import get_ocr_engine
+
+        engine = get_ocr_engine()
+        if engine is None:
+            return out
+        with fitz.open(stream=content, filetype="pdf") as d:
+            for idx in page_indices_0:
+                try:
+                    if idx >= d.page_count:
+                        continue
+                    pix = d[idx].get_pixmap(dpi=PDF_OCR_RENDER_DPI, alpha=False)
+                    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                        pix.height, pix.width, pix.n
+                    )
+                    result = engine(img)
+                    txts = getattr(result, "txts", None) or ()
+                    out[idx] = "\n".join(t for t in txts if t).strip()
+                except Exception as exc:
+                    logger.warning("OCR failed for page %d: %s", idx + 1, exc)
+                    out[idx] = ""
+    except Exception as exc:
+        # Missing optional deps (fitz / numpy / rapidocr) — leave all "".
+        logger.info("OCR unavailable for this parse: %s", exc)
+    return out
+
+
+def _ocr_embedded_images(content: bytes, skip_pages: set[int]) -> list[tuple[int, str]]:
+    """OCR text inside embedded figure images, returning [(page_num_1, text), ...].
+
+    Unlike :func:`_ocr_pages` (which renders whole deficient pages), this
+    targets individual embedded raster images on *any* page — so a figure
+    (chart labels, a screenshot of text, a diagram) sitting on a page that
+    also has body text still gets its text recovered. Guarded to stay cheap and
+    quiet on figure-heavy docs:
+
+    - Dedupes by PyMuPDF xref (one image reused on many pages is OCR'd once).
+    - Skips images below ``PDF_OCR_IMAGE_MIN_PIXELS`` (logos / icons / scraps).
+    - Skips images on pages in ``skip_pages`` (already page-level-OCR'd).
+    - Keeps an image's text only if it has ≥ ``PDF_OCR_FIGURE_MIN_CHARS``
+      alphanumeric chars (drops blank / decorative / noisy images).
+    - Stops after ``PDF_OCR_MAX_IMAGES`` images (caps worst-case time).
+
+    All heavy imports are local so a missing OCR group never breaks Tier 0.
+    """
+    from config import (
+        PDF_OCR_EMBEDDED_IMAGES,
+        PDF_OCR_FIGURE_MIN_CHARS,
+        PDF_OCR_IMAGE_MIN_PIXELS,
+        PDF_OCR_MAX_IMAGES,
+    )
+
+    results: list[tuple[int, str]] = []
+    if not PDF_OCR_EMBEDDED_IMAGES:
+        return results
+    try:
+        import fitz  # type: ignore
+
+        from pdf_capabilities import get_ocr_engine
+
+        engine = get_ocr_engine()
+        if engine is None:
+            return results
+        seen_xrefs: set[int] = set()
+        kept = 0
+        with fitz.open(stream=content, filetype="pdf") as d:
+            for pno in range(d.page_count):
+                page_num = pno + 1  # 1-indexed
+                is_skip_page = page_num in skip_pages
+                try:
+                    images = d[pno].get_images(full=True)
+                except Exception:
+                    images = []
+                for img_info in images:
+                    xref = img_info[0] if img_info else 0
+                    if not xref or xref in seen_xrefs:
+                        continue
+                    seen_xrefs.add(xref)
+                    if is_skip_page:
+                        # Page already rendered+OCR'd as deficient — its image
+                        # pixels were read there; don't duplicate.
+                        continue
+                    if kept >= PDF_OCR_MAX_IMAGES:
+                        return results
+                    try:
+                        ex = d.extract_image(xref)
+                        raw = ex.get("image", b"")
+                        w = ex.get("width", 0) or 0
+                        h = ex.get("height", 0) or 0
+                    except Exception as exc:
+                        logger.debug("figure-OCR: extract failed xref=%s: %s", xref, exc)
+                        continue
+                    if not raw or (w * h) < PDF_OCR_IMAGE_MIN_PIXELS:
+                        continue
+                    try:
+                        result = engine(raw)
+                        txts = getattr(result, "txts", None) or ()
+                        text = " ".join(t for t in txts if t).strip()
+                    except Exception as exc:
+                        logger.debug("figure-OCR: ocr failed xref=%s: %s", xref, exc)
+                        continue
+                    # Keep only meaningful text (filters blank/noisy images).
+                    alnum = sum(1 for c in text if c.isalnum())
+                    if alnum < PDF_OCR_FIGURE_MIN_CHARS:
+                        continue
+                    results.append((page_num, text))
+                    kept += 1
+    except Exception as exc:
+        logger.info("figure-OCR unavailable for this parse: %s", exc)
+    return results
+
+
+def parse_pdf(content: bytes, filename: str, mode: str = "auto") -> PaperDocument:
+    """Extract text and figures from a PDF.
+
+    mode:
+      "fast" — Tier 0: pdfplumber native text layer only (always available).
+      "auto" — Tier 1: Fast + page-level OCR (RapidOCR + PyMuPDF) on pages whose
+               native text is empty/short/garbled. Degrades to Fast when the
+               optional OCR deps are missing; pages it could not read are listed
+               in ``doc.ocr_deficient_pages`` so the UI can hint the install.
+    """
     import pdfplumber
 
-    doc = PaperDocument(title=filename, raw_format="pdf")
-    full_text_parts = []
+    from config import (
+        PDF_DEFAULT_MODE,
+        PDF_OCR_EMBEDDED_IMAGES,
+        PDF_OCR_ENABLED,
+        PDF_OCR_MAX_PAGES,
+    )
+
+    # Resolve the effective mode: "auto" only stays auto if the master switch
+    # is on; everything else falls back to Fast.
+    if mode not in ("fast", "auto", "deep"):
+        mode = PDF_DEFAULT_MODE
+    if mode == "deep":
+        # Tier 2 deferred — degrade to auto.
+        mode = "auto"
+    if mode == "auto" and not PDF_OCR_ENABLED:
+        mode = "fast"
+
+    # Parse cache (decision 6).
+    key = _cache_key(content, mode)
+    cached = _PDF_PARSE_CACHE.get(key)
+    if cached is not None:
+        _PDF_PARSE_CACHE.move_to_end(key)
+        logger.info("Parsed PDF '%s' (mode=%s): cache hit", filename, mode)
+        return cached
+
+    doc = PaperDocument(title=filename, raw_format="pdf", parse_mode=mode)
+    full_text_parts: list[str] = []
     all_figures: list[FigureInfo] = []
 
+    # Pass 1: native text + deficiency flag + image metadata, per page.
+    page_native: list[tuple[int, str, bool]] = []  # (page_num_1, text, deficient)
     with pdfplumber.open(io.BytesIO(content)) as pdf:
         for i, page in enumerate(pdf.pages, start=1):
-            text = page.extract_text()
-            if text:
-                full_text_parts.append(text)
-
-            # Check for embedded images
+            text = page.extract_text() or ""
+            deficient = _native_text_is_deficient(text)
+            page_native.append((i, text, deficient))
             if hasattr(page, "images") and page.images:
-                for img_idx, img in enumerate(page.images):
+                for img_idx, _img in enumerate(page.images):
                     all_figures.append(
                         FigureInfo(
                             filename=f"page{i}_img{img_idx}.png",
@@ -92,13 +299,75 @@ def parse_pdf(content: bytes, filename: str) -> PaperDocument:
                         )
                     )
 
+    deficient_pages = [p for p, _, d in page_native if d]
+
+    # Decide whether OCR runs at all.
+    ocr_pages_run: list[int] = []          # 1-indexed pages actually OCR'd
+    ocr_deficient: list[int] = []          # 1-indexed pages left unrecovered
+    ocr_text_by_page: dict[int, str] = {}  # 0-indexed -> recovered text
+
+    if mode == "auto" and deficient_pages:
+        from pdf_capabilities import get_pdf_capabilities
+
+        caps = get_pdf_capabilities()
+        over_cap = len(deficient_pages) > PDF_OCR_MAX_PAGES
+        if not caps["auto"]:
+            # OCR deps missing — flag every deficient page for the UI hint.
+            ocr_deficient = list(deficient_pages)
+        elif over_cap:
+            logger.info(
+                "PDF '%s': %d deficient pages exceed OCR cap (%d); skipping OCR",
+                filename, len(deficient_pages), PDF_OCR_MAX_PAGES,
+            )
+            ocr_deficient = list(deficient_pages)
+        else:
+            recovered = _ocr_pages(content, [p - 1 for p in deficient_pages])
+            for p in deficient_pages:
+                text = recovered.get(p - 1, "")
+                if text:
+                    ocr_pages_run.append(p)
+                    ocr_text_by_page[p] = text
+                else:
+                    ocr_deficient.append(p)
+
+    # Pass 2: assemble full_text in document order, substituting OCR text for
+    # recovered pages and keeping native text (even if empty) otherwise.
+    for i, native_text, _deficient in page_native:
+        if i in ocr_text_by_page:
+            full_text_parts.append(ocr_text_by_page[i])
+        else:
+            full_text_parts.append(native_text)
+
+    # Per-image figure OCR (auto mode only): recover text inside embedded
+    # figure images on any page. Skips pages already page-level-OCR'd above.
+    figure_ocr_pages: list[int] = []
+    if mode == "auto" and PDF_OCR_EMBEDDED_IMAGES:
+        figure_hits = _ocr_embedded_images(content, skip_pages=set(ocr_pages_run))
+        for page_num, text in figure_hits:
+            full_text_parts.append(f"[Figure text (page {page_num}, OCR): {text}]")
+            figure_ocr_pages.append(page_num)
+
     doc.full_text = "\n\n".join(full_text_parts)
     doc.figures = all_figures
+    doc.ocr_pages = ocr_pages_run
+    doc.ocr_deficient_pages = ocr_deficient
+    doc.figure_ocr_pages = figure_ocr_pages
+    doc.figure_ocr_count = len(figure_ocr_pages)
     doc.sections = _parse_sections(doc.full_text)
     doc.title, doc.abstract, doc.authors = _extract_metadata(doc.full_text)
 
-    logger.info("Parsed PDF '%s': %d pages, %d sections, %d images",
-                 filename, len(full_text_parts), len(doc.sections), len(all_figures))
+    # Store in cache.
+    _PDF_PARSE_CACHE[key] = doc
+    _PDF_PARSE_CACHE.move_to_end(key)
+    while len(_PDF_PARSE_CACHE) > _PDF_PARSE_CACHE_MAX:
+        _PDF_PARSE_CACHE.popitem(last=False)
+
+    logger.info(
+        "Parsed PDF '%s' (mode=%s): %d pages, %d sections, %d images, "
+        "%d page-OCR'd, %d deficient-unread, %d figure-images-OCR'd",
+        filename, mode, len(page_native), len(doc.sections), len(all_figures),
+        len(ocr_pages_run), len(ocr_deficient), len(figure_ocr_pages),
+    )
     return doc
 
 

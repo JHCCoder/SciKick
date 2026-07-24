@@ -50,9 +50,10 @@ Whether you're preparing a new manuscript or responding to peer review, SciKick 
 
 ### Limitations
 
-- **Figures and images are not automatically analyzed** — SciKick extracts text from your files, not images. The AI can discuss figures via their captions and surrounding text, but cannot "see" graphs, microscopy images, or charts embedded in your documents.
-- **Manual workaround** — you can paste screenshots of figures directly into the chat for visual analysis. This works with multi-modal LLMs like **Claude** (Sonnet 4, Opus 4, Fable 5) and **GPT-4o**.
-- **Future plans** — if enough people ask for it, we'll add automatic figure extraction and parsing from PDFs and DOCX files. Let us know!
+- **Figure text is extracted, but not pure visuals** — In Auto/Deep mode, SciKick runs OCR on each embedded figure image and recovers the *text* inside it (axis labels, legend text, labels on a diagram, text in a screenshot). The AI can discuss figures using their captions, surrounding text, and that OCR'd figure text. It cannot, however, "see" purely visual content — exact data-point values read off a curve, microscopy detail, color/shape relationships. For that, paste a screenshot into the chat.
+- **Visual analysis workaround** — you can paste screenshots of figures directly into the chat for true visual analysis. This works with multi-modal LLMs like **Claude** (Sonnet 4, Opus 4, Fable 5) and **GPT-4o**.
+- **Scanned PDFs need the optional OCR tier** — the base install reads only the native text layer, so scanned/image-only PDFs come back empty until you run `./start.sh --ocr` (see [Notes on extraction](#notes-on-extraction)).
+- **Future plans** — Deep PDF parsing (layout, reading order, tables, formulas, figure–caption association via Docling) is on the roadmap.
 
 ---
 
@@ -277,8 +278,20 @@ Before your first message of a session the bar shows a rough projection; after t
 ### Notes on extraction
 
 - Text and figure legends are extracted from `.docx`/`.pdf`. In `.docx`, **table cell text is also extracted** (rendered as markdown-style tables, in document order). PDF tables are not reconstructed — only flowed text is read.
+- **PDF parsing has two tiers.** **Fast** (the default install) reads the PDF's native text layer — fast and always available, but returns nothing for scanned or image-only pages. **Auto** (optional) adds OCR in two ways: (1) **page-level** — when a page's text layer is empty or garbled, it renders the page and OCRs it so scanned supplements and image-only PDFs become readable; (2) **per-image figure OCR** — text embedded inside figure images (chart axis labels, screenshots of text, diagrams with labels) on any page is recovered by OCR'ing each embedded image. Google Docs are now exported as PDF and go through the same pipeline, so figures inside a Google Doc are OCR'd too. Auto is used automatically when installed; see [Enable scanned-PDF OCR](#enable-scanned-pdf-ocr-optional) below. (A third tier, **Deep** — layout/reading-order/table/formula reconstruction via Docling — is planned but not yet available.)
+- **Figure OCR limits.** Per-image figure OCR skips tiny images (logos/icons) and is capped per document (30 images) so figure-heavy papers don't stall the parse. Purely vector figures (no raster image to read) can't be OCR'd — their captions and surrounding text are still extracted as usual.
 - Very large files are capped per document, but the cap **scales with your model's context window** (roughly half the window for a one-shot scan, a quarter for a kept doc). On a 1M-token model a typical manuscript or supplement loads in full; on a 128k-token model the cap is ~256k characters. If a file exceeds the cap, only the first portion is loaded and the model will tell you it was truncated and suggest asking about a specific section for the rest.
 - Kept text is frozen at keep-time. If you edit a kept file on Drive, click **Load Project** (same folder — it preserves your kept list) and re-keep that file to refresh it.
+
+#### Enable scanned-PDF OCR (optional)
+
+The base install is text-layer-only. If your project includes scanned or image-only PDFs (older supplements, scanned reviewer letters), enable the **Auto** OCR tier — it's a one-command, fully-local install (no API keys, no cloud, no model downloads at runtime):
+
+```bash
+./start.sh --ocr
+```
+
+This adds PyMuPDF + RapidOCR + ONNX Runtime (~150 MB). Then reload your project. If OCR isn't installed and a page can't be read, the panel tells you exactly how many pages were missed and shows the command to fix it. The ⚙ Settings panel displays the current tier status (`PDF parsing: Fast ✓ · Auto ✓`).
 
 ---
 

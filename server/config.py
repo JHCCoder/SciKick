@@ -242,6 +242,31 @@ MAX_IMAGE_SIZE_MB = 25
 CHAT_HISTORY_LIMIT = 50  # number of turns to keep in memory
 
 # ---------------------------------------------------------------------------
+# PDF parsing — Fast / Auto / Deep capability ladder
+#
+# Tier 0 (Fast) = pdfplumber native text layer (always available, base install).
+# Tier 1 (Auto) = Fast + page-level OCR (RapidOCR + ONNX, PyMuPDF renderer) on
+#   pages whose native text is empty / too short / image-heavy / garbled. The
+#   OCR deps are an OPTIONAL install group (requirements-ocr.txt / ./start.sh
+#   --ocr); when absent, Auto degrades to Fast and records the pages it could
+#   not read so the UI can hint the user toward `./start.sh --ocr`.
+# Tier 2 (Deep, Docling) is deferred — not configured here yet.
+# ---------------------------------------------------------------------------
+PDF_DEFAULT_MODE = "auto"          # Load Project uses Auto at most
+PDF_OCR_ENABLED = True             # master switch for the Auto tier
+PDF_OCR_MIN_NATIVE_CHARS = 20      # fewer non-space chars => page is "deficient"
+PDF_OCR_RENDER_DPI = 300           # PyMuPDF render resolution for OCR
+PDF_OCR_MAX_PAGES = 200            # safety cap — OCR is slow; above this, skip + flag
+# Per-image figure OCR (Auto mode): OCR text inside embedded figure images
+# (charts, screenshots, diagrams) on any page — not just deficient pages. Skips
+# tiny images (logos/icons) and caps the count so figure-heavy docs don't stall.
+PDF_OCR_EMBEDDED_IMAGES = True     # master switch for per-image figure OCR
+PDF_OCR_IMAGE_MIN_PIXELS = 10000   # ~100x100; skip smaller images
+PDF_OCR_FIGURE_MIN_CHARS = 4       # alphanumeric chars needed to keep an image's OCR
+PDF_OCR_MAX_IMAGES = 30            # cap images OCR'd per document
+PDF_PARSER_VERSION = 2             # bump when parsing logic changes (parse-cache key)
+
+# ---------------------------------------------------------------------------
 # Section headers for scientific paper detection
 # ---------------------------------------------------------------------------
 SECTION_PATTERNS = [

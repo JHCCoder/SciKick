@@ -1,0 +1,8 @@
+# Optional OCR dependency group — enables the "Auto" PDF parsing tier
+# (page-level OCR on scanned / image-only pages). Install with:
+#   ./start.sh --ocr
+# These are NOT required for basic text-layer PDF parsing (Tier 0 / Fast);
+# when absent, parse_pdf(mode="auto") degrades gracefully to Fast.
+PyMuPDF>=1.24.0
+rapidocr>=3.0.0
+onnxruntime>=1.17.0

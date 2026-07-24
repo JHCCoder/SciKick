@@ -376,7 +376,7 @@ You are powered by an LLM that the user configured in the ⚙ Settings panel. At
 
 ## Important
 - Never fabricate citations, references, or data that aren't in the paper or user-provided feedback.
-- **Never fabricate document content.** When you reference text from a loaded/kept document (the "## Loaded Documents" block), the manuscript, reviewer comments, or any scraped article, it must come from text actually present there — quote it or paraphrase it closely. Do NOT invent figure titles, figure legends, panel descriptions, section headings, captions, tables, or data values that you cannot locate in the provided text. If a figure or section exists only as an embedded image, its visual content is NOT available to you — say so, rather than guessing what it depicts.
+- **Never fabricate document content.** When you reference text from a loaded/kept document (the "## Loaded Documents" block), the manuscript, reviewer comments, or any scraped article, it must come from text actually present there — quote it or paraphrase it closely. Do NOT invent figure titles, figure legends, panel descriptions, section headings, captions, tables, or data values that you cannot locate in the provided text. Text *inside* a figure (axis labels, legend text, diagram labels, text in a screenshot) may have been recovered via OCR and appears as a "[Figure text (page N, OCR): ...]" block — you CAN read and quote that. But a figure's purely visual content (exact data-point values, microscopy detail, color/shape relationships) is NOT available unless the user pastes the image into the chat — say so, rather than guessing what a figure depicts.
 - **If you cannot find specific content the user asks about** (a figure legend, a section, a value, a caption), say so plainly: "I don't see X in the loaded document." Do NOT claim the content is blank, missing, or "not filled in yet" unless you have scanned the entire provided text and confirmed the absence by quoting what IS there. A long run of blank lines in the extracted text almost always means an embedded image or layout spacing was stripped during extraction — it does NOT mean text is missing. Search the rest of the document (including later sections) before concluding any content is absent.
 - If you're unsure about a domain-specific detail, flag it rather than guess — the user is the expert in their field.
 - The user is the domain expert; your job is to help them express their expertise clearly and persuasively.
@@ -661,7 +661,13 @@ async def _download_and_parse_file(file_id: str, file_name: str) -> str | None:
         if mime == "application/pdf" and "content_bytes" in downloaded:
             from file_processor import parse_pdf
             content_bytes = bytes.fromhex(downloaded["content_bytes"])
-            doc = parse_pdf(content_bytes, file_name)
+            doc = parse_pdf(content_bytes, file_name, mode="auto")
+            parsed_text = doc.full_text
+        elif mime == "application/vnd.google-apps.document" and "content_bytes" in downloaded:
+            # Google Doc — now exported as PDF so embedded figures get OCR'd.
+            from file_processor import parse_pdf
+            content_bytes = bytes.fromhex(downloaded["content_bytes"])
+            doc = parse_pdf(content_bytes, file_name, mode="auto")
             parsed_text = doc.full_text
         elif mime in ("application/vnd.openxmlformats-officedocument.wordprocessingml.document",) and "content_bytes" in downloaded:
             from file_processor import parse_docx
@@ -1921,10 +1927,14 @@ def _build_user_message(
             f"## Focused File: {current_file['name']}\n"
             f"The user has asked to focus on this file. Below is the FULL content. "
             f"Read it carefully and be prepared to answer detailed questions about it.\n\n"
-            f"Note: Figures, images, and embedded graphics may appear as garbled binary or "
-            f"base64 text — you cannot parse those. Skip over them and focus on the "
-            f"readable text content. If the user asks about a figure you cannot read, "
-            f"tell them honestly and ask them to describe or paste the figure content.{ftruncation}\n"
+            f"Note: Text *inside* figures (axis labels, legend text, diagram labels, "
+            f"text in screenshots) may have been recovered via OCR and appears as "
+            f"\"[Figure text (page N, OCR): ...]\" blocks — you can read and discuss those. "
+            f"Any remaining garbled binary or base64 text is raw image data you cannot "
+            f"parse — skip over it. A figure's purely visual content (exact data-point "
+            f"values, microscopy detail, color/shape relationships) is NOT available "
+            f"unless the user pastes the image; if asked about that, say so honestly and "
+            f"ask them to paste the figure.{ftruncation}\n"
         )
         parts.append(fbody)
         parts.append("---\n")
@@ -1999,9 +2009,11 @@ def _build_user_message(
             "the server restarts. Treat their text as source material alongside "
             "the manuscript. IMPORTANT: only quote/paraphrase text that is "
             "actually present below — never invent figure titles, legends, or "
-            "captions. Long runs of blank lines are stripped embedded images, "
-            "NOT missing text; scan the whole file before claiming any content "
-            "is absent, and if you truly can't find it, say so honestly.\n"
+            "captions. Text inside figures may have been OCR'd and appear as "
+            "\"[Figure text (page N, OCR): ...]\" blocks you can read. Long runs "
+            "of blank lines are stripped embedded images, NOT missing text; scan "
+            "the whole file before claiming any content is absent, and if you "
+            "truly can't find it, say so honestly.\n"
         )
         cap = _doc_char_budget(0.25)  # kept docs are resent every turn — smaller share
         for d in _loaded_docs:
@@ -2735,6 +2747,27 @@ async def list_providers():
     }
 
 
+@router.get("/pdf-capabilities")
+async def pdf_capabilities():
+    """Report the available PDF parsing tiers (Fast / Auto / Deep).
+
+    Fast (pdfplumber text layer) is always available. Auto (page-level OCR on
+    scanned pages) is available only when the optional OCR group is installed
+    via ``./start.sh --ocr``. Deep (Docling) is deferred. The panel uses this to
+    show a "PDF parsing: Fast ✓ · Auto ✓/✗" status line and an install hint.
+    """
+    from pdf_capabilities import get_pdf_capabilities
+
+    caps = get_pdf_capabilities()
+    return {
+        "fast": caps["fast"],
+        "auto": caps["auto"],
+        "deep": caps["deep"],
+        "ocr_reason": caps.get("ocr_reason"),
+        "install_hint": caps.get("install_hint"),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Context window tracking
 # ---------------------------------------------------------------------------
@@ -2991,6 +3024,9 @@ async def get_context():
             "sections": [s.heading for s in _current_doc.sections],
             "figures": [f.filename for f in _current_doc.figures],
             "full_text_length": len(_current_doc.full_text),
+            "pdf_parse_mode": getattr(_current_doc, "parse_mode", "fast"),
+            "ocr_pages": list(getattr(_current_doc, "ocr_pages", [])),
+            "ocr_deficient_pages": list(getattr(_current_doc, "ocr_deficient_pages", [])),
         }
         comments = [
             {

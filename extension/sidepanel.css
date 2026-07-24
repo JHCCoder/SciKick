@@ -305,6 +305,16 @@ body {
   color: var(--settings-hint);
   margin-top: 8px;
 }
+/* PDF parsing tier status (Fast ✓ · Auto ✓ · Deep —) shown in Settings. */
+.pdf-cap-status {
+  font-size: 11px;
+  color: var(--settings-hint);
+  margin-top: 6px;
+  white-space: pre-line;
+}
+.pdf-cap-status.pdf-cap-missing {
+  color: var(--danger);
+}
 .hidden { display: none !important; }
 
 /* --- Info Panel (purple theme) --- */

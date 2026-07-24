@@ -79,6 +79,7 @@ const dom = {
   cfgBaseUrl: $("#cfg-base-url"),
   cfgBaseUrlLabel: $("#cfg-base-url-label"),
   cfgStatus: $("#cfg-status"),
+  pdfCapStatus: $("#pdf-cap-status"),
   // Info panel
   btnInfo: $("#btn-info"),
   infoPanel: $("#info-panel"),
@@ -197,6 +198,8 @@ async function connect() {
   if (ok) {
     // Show active provider
     await showProviderInfo();
+    // Detect PDF parsing tiers (Fast / Auto / Deep) for the Settings status line.
+    checkPdfCapabilities();
     // Onboarding (generic brainstorming picker vs. project-goal onboarding) is
     // decided by checkExistingSession below, once we know whether a project
     // is active — so we don't double-prompt.
@@ -270,6 +273,38 @@ async function showProviderInfo() {
   } catch (e) {
     // Provider info not critical
   }
+}
+
+// Cached PDF parsing capabilities (Fast / Auto / Deep). Polled once after the
+// server connects; the Settings panel renders a status line and an install
+// hint when the Auto (scanned-page OCR) tier isn't installed.
+let pdfCaps = null;
+
+async function checkPdfCapabilities() {
+  if (!serverConnected) return;
+  try {
+    const res = await fetch(`${SERVER_URL}/chat/pdf-capabilities`);
+    if (!res.ok) return;
+    pdfCaps = await res.json();
+    renderPdfCapStatus();
+  } catch {
+    // Non-critical — leave the status line as-is.
+  }
+}
+
+function renderPdfCapStatus() {
+  if (!dom.pdfCapStatus || !pdfCaps) return;
+  const fast = pdfCaps.fast ? "Fast ✓" : "Fast ✗";
+  const auto = pdfCaps.auto ? "Auto ✓" : "Auto ✗";
+  const deep = pdfCaps.deep ? "Deep ✓" : "Deep —";
+  let line = `PDF parsing: ${fast} · ${auto} · ${deep}`;
+  if (!pdfCaps.auto && pdfCaps.install_hint) {
+    // Scanned-page OCR not installed — show the install command so the user
+    // knows exactly how to enable it (mirrors the Drive-setup gate pattern).
+    line += `\n${pdfCaps.install_hint}`;
+  }
+  dom.pdfCapStatus.textContent = line;
+  dom.pdfCapStatus.classList.toggle("pdf-cap-missing", !pdfCaps.auto);
 }
 
 function showProviderHint(provider, model) {
@@ -590,6 +625,18 @@ async function loadProject() {
             `Figures found: ${(ms.figures || []).length}`
           : `📁 No single manuscript detected — I've examined the folder and parsed what's here. Paste paper text or scan a file when you want to go deeper.`;
         showSystemMessage(fcLine + summaryLine + manuscriptLine);
+        // Scanned-page OCR hint: if the manuscript had pages the parser
+        // couldn't read (OCR not installed / over cap / failed), tell the user
+        // exactly how to recover them — same actionable-command pattern as the
+        // Drive-setup gate. Only fires when there's something to say.
+        const deficient = (ms && ms.ocr_deficient_pages) || [];
+        if (deficient.length > 0) {
+          const cmd = (pdfCaps && pdfCaps.install_hint) ? pdfCaps.install_hint : "Run: ./start.sh --ocr";
+          showSystemMessage(
+            `📄 ${deficient.length} scanned page${deficient.length > 1 ? "s" : ""} in the manuscript couldn't be read ` +
+            `(OCR not installed). ${cmd}, then reload the project to recover them.`
+          );
+        }
         projectLoadedFromServer = true;
       } else {
         const err = await loadRes.json().catch(() => ({ detail: "Failed to load context" }));
