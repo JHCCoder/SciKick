@@ -626,16 +626,30 @@ async function loadProject() {
           : `📁 No single manuscript detected — I've examined the folder and parsed what's here. Paste paper text or scan a file when you want to go deeper.`;
         showSystemMessage(fcLine + summaryLine + manuscriptLine);
         // Scanned-page OCR hint: if the manuscript had pages the parser
-        // couldn't read (OCR not installed / over cap / failed), tell the user
-        // exactly how to recover them — same actionable-command pattern as the
-        // Drive-setup gate. Only fires when there's something to say.
+        // couldn't recover, tell the user exactly what happened and how to fix
+        // it — same actionable-command pattern as the Drive-setup gate. Only
+        // fires when there's something to say. Wording depends on WHY the pages
+        // were left unread, so we never wrongly claim "OCR not installed".
         const deficient = (ms && ms.ocr_deficient_pages) || [];
+        const reason = (ms && ms.ocr_deficient_reason) || "";
         if (deficient.length > 0) {
-          const cmd = (pdfCaps && pdfCaps.install_hint) ? pdfCaps.install_hint : "Run: ./start.sh --ocr";
-          showSystemMessage(
-            `📄 ${deficient.length} scanned page${deficient.length > 1 ? "s" : ""} in the manuscript couldn't be read ` +
-            `(OCR not installed). ${cmd}, then reload the project to recover them.`
-          );
+          const n = deficient.length;
+          const pg = `page${n > 1 ? "s" : ""}`;
+          let msg;
+          if (reason === "not_installed" || (reason === "" && pdfCaps && !pdfCaps.auto)) {
+            // OCR deps missing — installing will recover these on reload.
+            const cmd = (pdfCaps && pdfCaps.install_hint) ? pdfCaps.install_hint : "Run: ./start.sh --ocr";
+            msg = `📄 ${n} scanned ${pg} in the manuscript couldn't be read (OCR not installed). ${cmd}, then reload the project to recover them.`;
+          } else if (reason === "over_cap") {
+            // OCR is installed, but the doc had more deficient pages than the
+            // per-document cap — OCR was skipped entirely for this file.
+            msg = `📄 ${n} scanned ${pg} in the manuscript couldn't be read (OCR is installed, but this file exceeds the per-document page cap, so OCR was skipped). Reload the project to retry, or ask about those pages individually.`;
+          } else {
+            // OCR ran but returned nothing for these pages (page_failed, or
+            // unknown reason with OCR installed).
+            msg = `📄 ${n} scanned ${pg} in the manuscript couldn't be read (OCR ran but couldn't recover them). Reload the project to retry, or paste those pages into the chat.`;
+          }
+          showSystemMessage(msg);
         }
         projectLoadedFromServer = true;
       } else {

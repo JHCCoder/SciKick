@@ -55,6 +55,12 @@ class PaperDocument:
     parse_mode: str = "fast"  # "fast" | "auto" | "deep"
     ocr_pages: list[int] = field(default_factory=list)  # 1-indexed pages OCR'd
     ocr_deficient_pages: list[int] = field(default_factory=list)  # pages that needed OCR but didn't get it
+    # Why ocr_deficient_pages is non-empty ("" when empty). Lets the UI
+    # distinguish "install OCR" from "OCR ran but couldn't recover these":
+    #   "not_installed" — OCR deps missing; install to recover
+    #   "over_cap"      — OCR installed but deficient pages exceed PDF_OCR_MAX_PAGES
+    #   "page_failed"   — OCR ran on the page but returned nothing
+    ocr_deficient_reason: str = ""
     figure_ocr_pages: list[int] = field(default_factory=list)  # pages whose embedded images were OCR'd
     figure_ocr_count: int = 0  # number of embedded images OCR'd
 
@@ -304,6 +310,7 @@ def parse_pdf(content: bytes, filename: str, mode: str = "auto") -> PaperDocumen
     # Decide whether OCR runs at all.
     ocr_pages_run: list[int] = []          # 1-indexed pages actually OCR'd
     ocr_deficient: list[int] = []          # 1-indexed pages left unrecovered
+    ocr_deficient_reason: str = ""         # "not_installed" | "over_cap" | "page_failed"
     ocr_text_by_page: dict[int, str] = {}  # 0-indexed -> recovered text
 
     if mode == "auto" and deficient_pages:
@@ -314,12 +321,14 @@ def parse_pdf(content: bytes, filename: str, mode: str = "auto") -> PaperDocumen
         if not caps["auto"]:
             # OCR deps missing — flag every deficient page for the UI hint.
             ocr_deficient = list(deficient_pages)
+            ocr_deficient_reason = "not_installed"
         elif over_cap:
             logger.info(
                 "PDF '%s': %d deficient pages exceed OCR cap (%d); skipping OCR",
                 filename, len(deficient_pages), PDF_OCR_MAX_PAGES,
             )
             ocr_deficient = list(deficient_pages)
+            ocr_deficient_reason = "over_cap"
         else:
             recovered = _ocr_pages(content, [p - 1 for p in deficient_pages])
             for p in deficient_pages:
@@ -329,6 +338,8 @@ def parse_pdf(content: bytes, filename: str, mode: str = "auto") -> PaperDocumen
                     ocr_text_by_page[p] = text
                 else:
                     ocr_deficient.append(p)
+            if ocr_deficient:
+                ocr_deficient_reason = "page_failed"
 
     # Pass 2: assemble full_text in document order, substituting OCR text for
     # recovered pages and keeping native text (even if empty) otherwise.
@@ -351,6 +362,7 @@ def parse_pdf(content: bytes, filename: str, mode: str = "auto") -> PaperDocumen
     doc.figures = all_figures
     doc.ocr_pages = ocr_pages_run
     doc.ocr_deficient_pages = ocr_deficient
+    doc.ocr_deficient_reason = ocr_deficient_reason
     doc.figure_ocr_pages = figure_ocr_pages
     doc.figure_ocr_count = len(figure_ocr_pages)
     doc.sections = _parse_sections(doc.full_text)

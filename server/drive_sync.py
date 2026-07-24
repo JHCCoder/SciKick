@@ -1040,6 +1040,7 @@ async def load_context(folder_id: str, force: bool = False):
                 "pdf_parse_mode": getattr(doc, "parse_mode", "fast"),
                 "ocr_pages": list(getattr(doc, "ocr_pages", [])),
                 "ocr_deficient_pages": list(getattr(doc, "ocr_deficient_pages", [])),
+                "ocr_deficient_reason": getattr(doc, "ocr_deficient_reason", ""),
             }
             if doc is not None
             else None

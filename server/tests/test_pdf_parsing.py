@@ -192,6 +192,7 @@ def test_auto_degrades_when_ocr_unavailable(monkeypatch):
     assert doc.parse_mode == "auto"
     assert doc.ocr_pages == []
     assert doc.ocr_deficient_pages == [1]
+    assert doc.ocr_deficient_reason == "not_installed"
     assert doc.full_text.strip() == ""
 
 
@@ -214,6 +215,28 @@ def test_auto_falls_back_when_ocr_fails_per_page(monkeypatch):
     assert doc.parse_mode == "auto"
     assert doc.ocr_pages == []           # nothing recovered
     assert doc.ocr_deficient_pages == [1]  # the failed page is flagged
+    assert doc.ocr_deficient_reason == "page_failed"
+
+
+@needs_fitz
+def test_auto_over_cap_flags_over_cap_reason(monkeypatch):
+    # OCR is installed, but the doc has more deficient pages than the per-doc
+    # cap — OCR is skipped entirely and the reason distinguishes this from
+    # "not installed" (the UI wording differs for each).
+    import config
+    monkeypatch.setattr(config, "PDF_OCR_MAX_PAGES", 0)  # 1 deficient page > 0
+    monkeypatch.setattr(config, "PDF_OCR_EMBEDDED_IMAGES", False)  # skip figure OCR
+    monkeypatch.setattr(
+        pdf_capabilities, "_CAPS_CACHE",
+        {"fast": True, "auto": True, "deep": False, "ocr_reason": None,
+         "renderer": "pymupdf", "install_hint": "Run: ./start.sh --ocr"},
+    )
+
+    doc = parse_pdf(_make_scanned_pdf(), "scanned.pdf", mode="auto")
+    assert doc.parse_mode == "auto"
+    assert doc.ocr_pages == []           # OCR skipped, nothing recovered
+    assert doc.ocr_deficient_pages == [1]
+    assert doc.ocr_deficient_reason == "over_cap"
 
 
 # ---------------------------------------------------------------------------

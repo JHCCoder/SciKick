@@ -3027,6 +3027,7 @@ async def get_context():
             "pdf_parse_mode": getattr(_current_doc, "parse_mode", "fast"),
             "ocr_pages": list(getattr(_current_doc, "ocr_pages", [])),
             "ocr_deficient_pages": list(getattr(_current_doc, "ocr_deficient_pages", [])),
+            "ocr_deficient_reason": getattr(_current_doc, "ocr_deficient_reason", ""),
         }
         comments = [
             {
