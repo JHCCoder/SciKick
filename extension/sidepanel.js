@@ -2080,7 +2080,10 @@ async function init() {
       }
     });
     bgPort.onDisconnect.addListener(() => {
-      console.warn("[TabBar] Background port disconnected — will reconnect");
+      // Expected under MV3: the service worker recycles after ~30s idle and
+      // closes the port. debug (not warn) so this self-healing event doesn't
+      // light up the chrome://extensions error button. Reconnect is automatic.
+      console.debug("[TabBar] Background port disconnected — will reconnect");
       bgPort = null;
       // Service worker was recycled (or panel slept). Reconnect shortly; the
       // worker is recreated on-demand by chrome.runtime.connect.
