@@ -77,7 +77,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="scikick",
     description="AI research companion for brainstorming, writing, and analysis with Google Drive sync",
-    version="0.1.7",
+    version="0.1.8",
     lifespan=lifespan,
 )
 
@@ -94,7 +94,7 @@ app.add_middleware(
 @app.get("/health")
 async def health_check():
     """Health check endpoint — verifies the server is running."""
-    return {"status": "ok", "version": "0.1.7"}
+    return {"status": "ok", "version": "0.1.8"}
 
 
 @app.post("/server/restart")
