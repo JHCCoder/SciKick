@@ -35,6 +35,7 @@ let driveReady = false; // last known /drive/auth/status authenticated value
 let sessionFocus = null; // "brainstorming" | "paper_discussion" | "paper_writing" | "revision" | "other"
 let currentStream = null; // AbortController for SSE
 let loadingInProgress = false; // true during loadProject / scrape — suppress disconnect banner
+let generating = false; // true while an LLM response is streaming — locks input + scan (ChatGPT-style)
 let healthFailCount = 0; // consecutive health check failures (prevents false disconnect flash)
 let bgPort = null; // Port to background service worker (keep-alive only)
 
@@ -146,9 +147,9 @@ function setServerStatus(status) {
     dom.connectBanner.style.display = "none";
     dom.driveInput.disabled = false;
     dom.btnLoad.disabled = !dom.driveInput.value.trim();
-    // Enable chat regardless of whether a project is loaded
-    dom.chatInput.disabled = false;
-    dom.btnSend.disabled = false;
+    // Enable chat regardless of whether a project is loaded (unless a
+    // response is currently streaming — see applyInputState).
+    applyInputState();
 
     // First successful contact — remember it so future disconnects show the
     // "reconnect" banner (service hint) instead of the first-run "clone +
@@ -180,8 +181,7 @@ function setServerStatus(status) {
     dom.firstrunReconnect.classList.toggle("hidden", !everConnected);
     dom.driveInput.disabled = true;
     dom.btnLoad.disabled = true;
-    dom.chatInput.disabled = true;
-    dom.btnSend.disabled = true;
+    applyInputState();
     // No server → can't check Drive status; hide the Drive setup banner.
     dom.driveSetupBanner.style.display = "none";
 
@@ -464,8 +464,7 @@ async function checkExistingSession() {
         }
 
         projectLoaded = true;
-        dom.chatInput.disabled = false;
-        dom.btnSend.disabled = false;
+        applyInputState();
 
         // Project goal — recap if set, otherwise start onboarding. Replaces
         // the generic session-focus picker when a project is active.
@@ -694,8 +693,7 @@ async function loadProject() {
     }
 
     projectLoaded = true;
-    dom.chatInput.disabled = false;
-    dom.btnSend.disabled = false;
+    applyInputState();
 
     // Show context window usage
     updateContextUsage();
@@ -778,12 +776,28 @@ function setChatInput(text) {
   dom.chatInput.setSelectionRange(len, len);
 }
 
-// Show/hide the stop button to reflect whether a response is streaming.
+// Whether the chat input, send, and scan controls are interactive.
+// Disabled when the server is down OR an LLM response is streaming —
+// mirrors ChatGPT, where you can't queue another message mid-generation.
+// Centralized so the 5s health poll can't re-enable input mid-stream.
+function applyInputState() {
+  const enabled = serverConnected && !generating;
+  dom.chatInput.disabled = !enabled;
+  dom.btnSend.disabled = !enabled;
+  dom.btnScanTab.disabled = !enabled;
+}
+
+// Show/hide the stop button to reflect whether a response is streaming,
+// and lock the input + scan controls until it finishes (ChatGPT-style).
 function setGenerating(isGenerating) {
+  generating = isGenerating;
   dom.btnStop.classList.toggle("hidden", !isGenerating);
+  dom.btnSend.classList.toggle("hidden", isGenerating); // swap send ↔ stop
+  applyInputState();
 }
 
 async function sendMessage() {
+  if (generating) return; // a response is streaming — input is locked
   const text = dom.chatInput.value.trim();
   if (!text) return;
 
@@ -2166,6 +2180,7 @@ async function init() {
       if (fileRow) {
         const name = fileRow.dataset.fileName;
         if (name) {
+          if (generating) return; // don't scan while a response is streaming
           dom.chatInput.value = `scan and keep ${name} in context`;
           closeInfoPanel();
           sendMessage();
