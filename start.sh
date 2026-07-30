@@ -850,6 +850,19 @@ start_server() {
         echo ""
     fi
 
+    # Proactive OCR hint: detect whether the optional OCR group is importable.
+    # Without it, parse_pdf falls back to the text layer — most PDFs still read
+    # fine, but text inside figures and image-only scanned pages can't be
+    # recovered. Non-blocking; the side panel also surfaces this via
+    # /chat/pdf-capabilities. Lightweight import probe (no ONNX model load) so
+    # startup stays fast.
+    if ! "$VENV_DIR/bin/python" -c "import fitz, rapidocr, onnxruntime" >/dev/null 2>&1; then
+        echo -e "${YELLOW}PDF OCR not installed — falling back to the text layer (most PDFs still read fine).${NC}"
+        echo "  Without OCR, text inside figures and image-only scanned pages can't be recovered."
+        echo "  Run ./start.sh --ocr to enable (PyMuPDF + RapidOCR, ~150 MB)."
+        echo ""
+    fi
+
     echo ""
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${GREEN}  Server:  http://localhost:8742${NC}"

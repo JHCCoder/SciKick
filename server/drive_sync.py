@@ -827,7 +827,7 @@ async def load_context(folder_id: str, force: bool = False):
         else:
             logger.info("load-context: parsing manuscript '%s' (%s)", name, manuscript_file["mimeType"])
             manuscript_content = await download_file(ms_id)
-            doc = _parse_downloaded(manuscript_file, manuscript_content, pdf_mode=PDF_DEFAULT_MODE)
+            doc = _parse_downloaded(manuscript_file, manuscript_content, pdf_mode=PDF_DEFAULT_MODE, figure_ocr=False)
     else:
         logger.info("load-context: no manuscript detected — examining folder contents only")
 
@@ -860,10 +860,11 @@ async def load_context(folder_id: str, force: bool = False):
             if mt == "application/vnd.google-apps.spreadsheet" and "sheets" in downloaded:
                 comments.extend(extract_reviewer_comments_from_sheets(downloaded["sheets"]))
             elif mt == "application/vnd.google-apps.document" and "content_bytes" in downloaded:
-                # Google Doc comment file — now exported as PDF. Parse it (which
-                # also OCRs any figures) and extract comments from the text.
+                # Google Doc comment file — now exported as PDF. Parse it and
+                # extract comments from the text. figure OCR is off — comments
+                # live in the text layer, not inside figures.
                 from file_processor import parse_pdf
-                cdoc = parse_pdf(bytes.fromhex(downloaded["content_bytes"]), cf["name"], mode=PDF_DEFAULT_MODE)
+                cdoc = parse_pdf(bytes.fromhex(downloaded["content_bytes"]), cf["name"], mode=PDF_DEFAULT_MODE, figure_ocr=False)
                 comments.extend(extract_reviewer_comments(cdoc.full_text))
             elif "text" in downloaded:
                 comments.extend(extract_reviewer_comments(downloaded["text"]))
@@ -1153,7 +1154,7 @@ def classify_project_file(
     return "supporting" if _is_text_parseable(name, mime) else "miscellaneous"
 
 
-def _parse_downloaded(file_dict: dict, downloaded: dict, pdf_mode: str = "auto"):
+def _parse_downloaded(file_dict: dict, downloaded: dict, pdf_mode: str = "auto", figure_ocr: bool = False):
     """Dispatch a downloaded Drive file to the right text parser.
 
     Shared by the manuscript path and the "parse every other text file" pass
@@ -1161,7 +1162,9 @@ def _parse_downloaded(file_dict: dict, downloaded: dict, pdf_mode: str = "auto")
     (keys vary by type: ``content_bytes`` hex for binaries, ``text`` for
     Google Docs, ``sheets`` for Google Sheets). Returns a PaperDocument.
     ``pdf_mode`` is forwarded to parse_pdf ("fast" | "auto"); non-PDF files
-    ignore it.
+    ignore it. ``figure_ocr`` (default False) is forwarded to parse_pdf /
+    parse_docx — Load Project skips per-image figure OCR for speed; page-level
+    OCR on scanned PDF pages still runs. Scan-and-keep re-parses with True.
     """
     from file_processor import parse_pdf, parse_docx, parse_text
 
@@ -1170,16 +1173,16 @@ def _parse_downloaded(file_dict: dict, downloaded: dict, pdf_mode: str = "auto")
     size = int(file_dict.get("size", 0) or 0)
 
     if mime == "application/pdf":
-        return parse_pdf(bytes.fromhex(downloaded["content_bytes"]), name, mode=pdf_mode)
+        return parse_pdf(bytes.fromhex(downloaded["content_bytes"]), name, mode=pdf_mode, figure_ocr=figure_ocr)
     if mime == "application/vnd.google-apps.document":
         # Google Doc — _export_google_doc exports it as PDF (content_bytes) so
         # embedded figures get OCR'd via parse_pdf. Falls through to parse_text
         # only for legacy callers still returning markdown text.
         if "content_bytes" in downloaded:
-            return parse_pdf(bytes.fromhex(downloaded["content_bytes"]), name, mode=pdf_mode)
+            return parse_pdf(bytes.fromhex(downloaded["content_bytes"]), name, mode=pdf_mode, figure_ocr=figure_ocr)
         return parse_text(downloaded.get("text", ""), name)
     if mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-        return parse_docx(bytes.fromhex(downloaded["content_bytes"]), name)
+        return parse_docx(bytes.fromhex(downloaded["content_bytes"]), name, figure_ocr=figure_ocr)
     if mime == "text/markdown" or "text" in downloaded:
         return parse_text(downloaded.get("text", ""), name)
     if "sheets" in downloaded:
@@ -1193,9 +1196,9 @@ def _parse_downloaded(file_dict: dict, downloaded: dict, pdf_mode: str = "auto")
     # Binary fallback: try to decode, else pick a parser by extension.
     content_bytes = bytes.fromhex(downloaded.get("content_bytes", ""))
     if name.lower().endswith(".pdf"):
-        return parse_pdf(content_bytes, name, mode=pdf_mode)
+        return parse_pdf(content_bytes, name, mode=pdf_mode, figure_ocr=figure_ocr)
     if name.lower().endswith(".docx"):
-        return parse_docx(content_bytes, name)
+        return parse_docx(content_bytes, name, figure_ocr=figure_ocr)
     return parse_text(content_bytes.decode("utf-8", errors="replace"), name)
 
 

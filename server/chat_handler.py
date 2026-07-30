@@ -67,8 +67,9 @@ _current_doc_file_name: str = ""
 _scraped_docs: list[PaperDocument] = []
 _scraped_sources: list[str] = []  # URLs, parallel to _scraped_docs
 
-# Focused file cache — file_id → parsed text content
-_focused_file_cache: dict[str, str] = {}
+# Focused file cache — (file_id, figure_ocr) → parsed text content. Keyed by
+# figure_ocr so a text-only focus result isn't served for an OCR scan-and-keep.
+_focused_file_cache: dict[tuple[str, bool], str] = {}
 
 # Project file index — file name (lowercase) → list of {id, name} entries,
 # for name-based lookups. A list (not a single id) so that duplicate basenames
@@ -376,7 +377,7 @@ You are powered by an LLM that the user configured in the ⚙ Settings panel. At
 
 ## Important
 - Never fabricate citations, references, or data that aren't in the paper or user-provided feedback.
-- **Never fabricate document content.** When you reference text from a loaded/kept document (the "## Loaded Documents" block), the manuscript, reviewer comments, or any scraped article, it must come from text actually present there — quote it or paraphrase it closely. Do NOT invent figure titles, figure legends, panel descriptions, section headings, captions, tables, or data values that you cannot locate in the provided text. Text *inside* a figure (axis labels, legend text, diagram labels, text in a screenshot) may have been recovered via OCR and appears as a "[Figure text (page N, OCR): ...]" block — you CAN read and quote that. But a figure's purely visual content (exact data-point values, microscopy detail, color/shape relationships) is NOT available unless the user pastes the image into the chat — say so, rather than guessing what a figure depicts.
+- **Never fabricate document content.** When you reference text from a loaded/kept document (the "## Loaded Documents" block), the manuscript, reviewer comments, or any scraped article, it must come from text actually present there — quote it or paraphrase it closely. Do NOT invent figure titles, figure legends, panel descriptions, section headings, captions, tables, or data values that you cannot locate in the provided text. Text *inside* a figure (axis labels, legend text, diagram labels, text in a screenshot) may have been recovered via OCR and appears as a "[Figure text (OCR): ...]" block (PDFs include a page number, e.g. "[Figure text (page N, OCR): ...]") — you CAN read and quote that. But a figure's purely visual content (exact data-point values, microscopy detail, color/shape relationships) is NOT available unless the user pastes the image into the chat — say so, rather than guessing what a figure depicts.
 - **If you cannot find specific content the user asks about** (a figure legend, a section, a value, a caption), say so plainly: "I don't see X in the loaded document." Do NOT claim the content is blank, missing, or "not filled in yet" unless you have scanned the entire provided text and confirmed the absence by quoting what IS there. A long run of blank lines in the extracted text almost always means an embedded image or layout spacing was stripped during extraction — it does NOT mean text is missing. Search the rest of the document (including later sections) before concluding any content is absent.
 - If you're unsure about a domain-specific detail, flag it rather than guess — the user is the expert in their field.
 - The user is the domain expert; your job is to help them express their expertise clearly and persuasively.
@@ -641,14 +642,21 @@ _FOCUS_TRIGGERS = [
 ]
 
 
-async def _download_and_parse_file(file_id: str, file_name: str) -> str | None:
-    """Download and parse a project file from Drive. Returns parsed text or None."""
+async def _download_and_parse_file(file_id: str, file_name: str, figure_ocr: bool = True) -> str | None:
+    """Download and parse a project file from Drive. Returns parsed text or None.
+
+    ``figure_ocr`` (default True) is forwarded to parse_pdf / parse_docx —
+    scan-and-keep wants the full per-image figure-OCR treatment; one-shot focus
+    scans pass False to stay fast. The cache is keyed by (file_id, figure_ocr)
+    so a text-only focus result is never served for an OCR keep (or vice versa).
+    """
     global _focused_file_cache
+    cache_key = (file_id, figure_ocr)
 
     # Return cached content if available
-    if file_id in _focused_file_cache:
-        logger.info("Focus file: using cached content for '%s' (%s)", file_name, file_id)
-        return _focused_file_cache[file_id]
+    if cache_key in _focused_file_cache:
+        logger.info("Focus file: using cached content for '%s' (%s, figure_ocr=%s)", file_name, file_id, figure_ocr)
+        return _focused_file_cache[cache_key]
 
     try:
         from drive_sync import download_file
@@ -658,21 +666,25 @@ async def _download_and_parse_file(file_id: str, file_name: str) -> str | None:
         mime = downloaded.get("mimeType", "")
         parsed_text = ""
 
+        # Parsing (esp. per-image figure OCR) is CPU-heavy and synchronous —
+        # running it on the event loop blocks /health and every other request
+        # for the ~20-70s OCR takes, which the extension reads as a dead server
+        # ("backend not found") and resets its tab state. Offload to a thread.
         if mime == "application/pdf" and "content_bytes" in downloaded:
             from file_processor import parse_pdf
             content_bytes = bytes.fromhex(downloaded["content_bytes"])
-            doc = parse_pdf(content_bytes, file_name, mode="auto")
+            doc = await asyncio.to_thread(parse_pdf, content_bytes, file_name, "auto", figure_ocr)
             parsed_text = doc.full_text
         elif mime == "application/vnd.google-apps.document" and "content_bytes" in downloaded:
             # Google Doc — now exported as PDF so embedded figures get OCR'd.
             from file_processor import parse_pdf
             content_bytes = bytes.fromhex(downloaded["content_bytes"])
-            doc = parse_pdf(content_bytes, file_name, mode="auto")
+            doc = await asyncio.to_thread(parse_pdf, content_bytes, file_name, "auto", figure_ocr)
             parsed_text = doc.full_text
         elif mime in ("application/vnd.openxmlformats-officedocument.wordprocessingml.document",) and "content_bytes" in downloaded:
             from file_processor import parse_docx
             content_bytes = bytes.fromhex(downloaded["content_bytes"])
-            doc = parse_docx(content_bytes, file_name)
+            doc = await asyncio.to_thread(parse_docx, content_bytes, file_name, figure_ocr)
             parsed_text = doc.full_text
         elif mime in ("application/vnd.google-apps.document", "text/markdown") and "text" in downloaded:
             parsed_text = downloaded["text"]
@@ -697,8 +709,8 @@ async def _download_and_parse_file(file_id: str, file_name: str) -> str | None:
 
         # Cache for subsequent messages
         if parsed_text:
-            _focused_file_cache[file_id] = parsed_text
-            logger.info("Focus file: parsed and cached '%s' (%d chars)", file_name, len(parsed_text))
+            _focused_file_cache[cache_key] = parsed_text
+            logger.info("Focus file: parsed and cached '%s' (%d chars, figure_ocr=%s)", file_name, len(parsed_text), figure_ocr)
         return parsed_text
 
     except Exception as exc:
@@ -1228,7 +1240,7 @@ async def _prepare_scan_context(
             else:
                 focused_file_name = fname
                 focus_id = fid
-                focused_file_content = await _download_and_parse_file(fid, fname)
+                focused_file_content = await _download_and_parse_file(fid, fname, figure_ocr=False)
             return (focused_file_content, focused_file_name, focus_id,
                     full_manuscript_content, clarification_text)
         if kind == "deep_manuscript" and _current_doc is not None:
@@ -1256,19 +1268,47 @@ async def _prepare_scan_context(
     # successful keep we don't also set focused_file_content — that would
     # double-inject. Retrieval still runs (targeted) so the model has its
     # usual chunks alongside the newly-kept file.
+
+    async def _keep_manuscript_ocr(label: str) -> None:
+        """Scan-and-keep the manuscript with full figure OCR.
+
+        The manuscript is parsed text-only at Load Project (figure OCR off for
+        speed), so we can't just reuse ``_current_doc.full_text`` — that has no
+        ``[Figure text (OCR): …]`` blocks. Re-download + re-parse with
+        ``figure_ocr=True`` so the kept copy carries recovered figure text.
+        Re-keep is a cheap no-op via ``_is_kept_doc`` (the OCR re-parse is the
+        expensive part). On parse failure, surface the same File Scan Failed
+        clarification the non-manuscript keeps use.
+        """
+        nonlocal clarification_text
+        if not (_current_doc is not None and _current_doc_file_id):
+            return
+        if _is_kept_doc(_current_doc_file_id):
+            logger.info("Loaded-docs: '%s' (manuscript) already kept; skipping OCR re-parse", label)
+            return
+        ms_text = await _download_and_parse_file(_current_doc_file_id, label, figure_ocr=True)
+        if ms_text:
+            _add_loaded_doc(_current_doc_file_id, _current_doc_file_name or label, ms_text)
+            logger.info("Loaded-docs: '%s' is the manuscript; kept in full text with figure OCR", label)
+        else:
+            clarification_text = (
+                "## File Scan Failed\n"
+                f"The user asked to keep **{label}** loaded, but the server "
+                f"couldn't download/parse it with OCR (the file may be too large "
+                f"and the read timed out). Tell the user honestly and suggest they "
+                f"click **Load Project** again, then retry."
+            )
+
     if intent == "keep_named":
         named = _match_named_file(message)
         if named:
             fid, fname = named
             if _manuscript_text_if_target(fid) is not None:
-                # The named file IS the loaded manuscript — promote it from
-                # chunked _current_doc to full-text kept (every turn). Reuse the
-                # already-parsed text; no re-download. _add_loaded_doc dedupes by
-                # file_id, so re-pressing scan is idempotent, and sets the
-                # "kept" ack. Chunk retrieval is suppressed downstream when kept.
-                ms_text = _manuscript_text_if_target(fid)
-                _add_loaded_doc(_current_doc_file_id, _current_doc_file_name or fname, ms_text)
-                logger.info("Loaded-docs: '%s' is the manuscript; kept in full text", fname)
+                # The named file IS the loaded manuscript. It was parsed
+                # text-only at load, so re-parse with figure OCR for the keep
+                # (re-keep is a no-op). Chunk retrieval is suppressed downstream
+                # when kept.
+                await _keep_manuscript_ocr(fname)
             else:
                 text = await _download_and_parse_file(fid, fname)
                 if text:
@@ -1286,9 +1326,7 @@ async def _prepare_scan_context(
             fid = current_file["id"]
             fname = current_file.get("name", "unknown")
             if _manuscript_text_if_target(fid) is not None:
-                ms_text = _manuscript_text_if_target(fid)
-                _add_loaded_doc(_current_doc_file_id, _current_doc_file_name or fname, ms_text)
-                logger.info("Loaded-docs: current tab '%s' is the manuscript; kept in full text", fname)
+                await _keep_manuscript_ocr(fname)
             else:
                 text = await _download_and_parse_file(fid, fname)
                 if text:
@@ -1301,14 +1339,9 @@ async def _prepare_scan_context(
                         f"suggest they click **Load Project** again, then retry."
                     )
     elif intent == "keep_manuscript":
-        # Promote the manuscript from chunked _current_doc to full-text kept.
-        if _current_doc is not None and _current_doc_file_id:
-            _add_loaded_doc(
-                _current_doc_file_id,
-                _current_doc_file_name or "the manuscript",
-                _current_doc.full_text,
-            )
-            logger.info("Loaded-docs: manuscript kept in full text")
+        # Promote the manuscript from chunked _current_doc to full-text kept,
+        # re-parsed with figure OCR (load-time parse is text-only).
+        await _keep_manuscript_ocr(_current_doc_file_name or "the manuscript")
     elif intent == "remove_named":
         named = _match_named_file(message)
         if named:
@@ -1342,7 +1375,7 @@ async def _prepare_scan_context(
                 logger.info("Focus file: '%s' already kept; skipping one-shot inject", fname)
             else:
                 focus_id, focused_file_name = fid, fname
-                focused_file_content = await _download_and_parse_file(fid, fname)
+                focused_file_content = await _download_and_parse_file(fid, fname, figure_ocr=False)
                 # A named-file scan that fails to download (the usual cause is
                 # a large file timing out) must NOT silently degrade to 3-chunk
                 # retrieval — that leaves the model claiming it "can't see" a
@@ -1381,7 +1414,7 @@ async def _prepare_scan_context(
             else:
                 focus_id = fid
                 focused_file_name = current_file.get("name", "unknown")
-                focused_file_content = await _download_and_parse_file(fid, focused_file_name)
+                focused_file_content = await _download_and_parse_file(fid, focused_file_name, figure_ocr=False)
                 # Download can time out on large files (the manuscript is the
                 # usual culprit). Don't let that silently degrade a "scan this
                 # document" request to 3-chunk excerpts — fall back to the
@@ -1929,7 +1962,9 @@ def _build_user_message(
             f"Read it carefully and be prepared to answer detailed questions about it.\n\n"
             f"Note: Text *inside* figures (axis labels, legend text, diagram labels, "
             f"text in screenshots) may have been recovered via OCR and appears as "
-            f"\"[Figure text (page N, OCR): ...]\" blocks — you can read and discuss those. "
+            f"\"[Figure text (OCR): ...]\" blocks — for PDFs these include a page "
+            f"number, e.g. \"[Figure text (page N, OCR): ...]\". Either form is "
+            f"figure text you can read and discuss. "
             f"Any remaining garbled binary or base64 text is raw image data you cannot "
             f"parse — skip over it. A figure's purely visual content (exact data-point "
             f"values, microscopy detail, color/shape relationships) is NOT available "
@@ -2010,7 +2045,8 @@ def _build_user_message(
             "the manuscript. IMPORTANT: only quote/paraphrase text that is "
             "actually present below — never invent figure titles, legends, or "
             "captions. Text inside figures may have been OCR'd and appear as "
-            "\"[Figure text (page N, OCR): ...]\" blocks you can read. Long runs "
+            "\"[Figure text (OCR): ...]\" blocks you can read (PDFs include a "
+            "page number: \"[Figure text (page N, OCR): ...]\"). Long runs "
             "of blank lines are stripped embedded images, NOT missing text; scan "
             "the whole file before claiming any content is absent, and if you "
             "truly can't find it, say so honestly.\n"
@@ -2905,69 +2941,79 @@ async def context_usage():
 
 @router.post("/refresh-context")
 async def refresh_context():
-    """Condense loaded context to memory, then drop it to free the window.
+    """Start a new conversation: condense + clear chat and drop loaded context.
 
-    The button next to the context bar. The big per-turn context consumers
-    are the kept docs (_loaded_docs, injected in full every turn) and scraped
-    papers (_scraped_docs). This endpoint:
+    The button next to the context bar. Frees the context window for a fresh
+    line of questioning while keeping the loaded project. This endpoint:
 
-    1. Condenses — runs the LLM digest (flush_memory_if_dirty) so the
-       conversation about those docs becomes structured memory (decisions,
+    1. Condenses — runs the LLM digest (flush_memory_if_dirty) so important
+       points from the conversation become structured memory (decisions,
        summary, active_context), and records the reviewed file names in
-       active_context so the model remembers what was looked at after the
-       docs are gone.
-    2. Drops — clears _loaded_docs, _scraped_docs, _scraped_sources, and the
+       active_context so the model remembers what was looked at.
+    2. Clears the conversation — wipes memory.chat_history (the rolling raw
+       turn window) and the pending digest buffer. Distilled memory is kept.
+    3. Drops — clears _loaded_docs, _scraped_docs, _scraped_sources, and the
        one-shot _focused_file_cache, plus stale scan-flow flags. The Loaded
        Documents and Scraped Articles panels empty and the window frees up.
 
-    The displayed chat and the project baseline (manuscript _current_doc,
-    project docs, comments) are left intact — use Clear Chat / Unload Project
-    for those.
+    The project baseline (manuscript _current_doc, project docs, comments,
+    file index, Drive connection) is left intact. With no project loaded it
+    still works — clears any scraped/kept docs and returns a fresh slate.
     """
     global _loaded_docs, _scraped_docs, _scraped_sources, _focused_file_cache
     global _keep_ack, _awaiting_doc_choice, _awaiting_scan_confirmation, _scan_preference
     global _last_request_tokens, _last_request_system_tokens, _last_request_user_tokens
 
     memory = get_current_memory()
-    if memory is None:
-        return {"status": "no_memory", "message": "No active session to refresh."}
 
     # Snapshot what's about to be dropped (read under no lock — atomic refs).
     dropped_doc_names = [d["name"] for d in _loaded_docs]
     dropped_scraped_titles = [doc.title or doc.__class__.__name__ for doc in _scraped_docs]
     focused_cleared = len(_focused_file_cache)
 
-    # 1. Condense — digest any pending chat exchanges into structured memory.
+    # 1. Condense + reset the conversation. With a loaded project (memory present)
+    #    we digest pending exchanges into structured memory first (so important points
+    #    survive), then clear the raw rolling chat_history + pending buffer — a true
+    #    "new conversation" — while keeping the distilled memory (decisions, summary,
+    #    active_context). With no project loaded there's no memory to flush; we just
+    #    drop scraped/kept docs below and return a fresh slate. The loaded project
+    #    (manuscript, comments, project docs, file index) is left intact either way.
     memory_flushed = False
-    try:
-        from memory_manager import flush_memory_if_dirty
-        memory_flushed = await flush_memory_if_dirty()
-    except Exception as exc:
-        logger.warning("refresh-context: memory digest failed (non-fatal): %s", exc)
-
-    # Record what was reviewed in active_context so it survives the drop.
-    now = datetime.now(timezone.utc).isoformat()
-    note_parts = [f"Context condensed {now[:10]} — dropped from active context:"]
-    if dropped_doc_names:
-        note_parts.append("  kept docs: " + ", ".join(dropped_doc_names))
-    if dropped_scraped_titles:
-        note_parts.append("  scraped articles: " + ", ".join(dropped_scraped_titles))
-    if not dropped_doc_names and not dropped_scraped_titles:
-        note_parts.append("  (no loaded docs or scraped articles were held)")
-    note = "\n".join(note_parts)
-    existing = (memory.active_context or "").strip()
-    memory.active_context = (existing + "\n" + note) if existing else note
-    memory.last_updated = now
-
-    # Persist memory (local + Drive) BEFORE clearing the live context, so a
-    # crash between the two can't lose the condensation.
-    _save_local(memory)
-    if memory.project_folder_id:
+    chat_turns_cleared = 0
+    note = ""
+    if memory is not None:
+        from memory_manager import flush_memory_if_dirty, reset_pending
         try:
-            from drive_sync import _save_memory_to_drive
-            await _save_memory_to_drive(memory.project_folder_id, memory.model_dump())
+            memory_flushed = await flush_memory_if_dirty()
         except Exception as exc:
-            logger.warning("refresh-context: Drive sync failed (non-fatal): %s", exc)
+            logger.warning("refresh-context: memory digest failed (non-fatal): %s", exc)
+        chat_turns_cleared = len(memory.chat_history) // 2
+        memory.chat_history = []
+        reset_pending()
+
+        # Record what was reviewed in active_context so it survives the drop.
+        now = datetime.now(timezone.utc).isoformat()
+        note_parts = [f"Context condensed {now[:10]} — conversation reset, dropped from active context:"]
+        if dropped_doc_names:
+            note_parts.append("  kept docs: " + ", ".join(dropped_doc_names))
+        if dropped_scraped_titles:
+            note_parts.append("  scraped articles: " + ", ".join(dropped_scraped_titles))
+        if not dropped_doc_names and not dropped_scraped_titles:
+            note_parts.append("  (no loaded docs or scraped articles were held)")
+        note = "\n".join(note_parts)
+        existing = (memory.active_context or "").strip()
+        memory.active_context = (existing + "\n" + note) if existing else note
+        memory.last_updated = now
+
+        # Persist memory (local + Drive) BEFORE clearing the live context, so a
+        # crash between the two can't lose the condensation.
+        _save_local(memory)
+        if memory.project_folder_id:
+            try:
+                from drive_sync import _save_memory_to_drive
+                await _save_memory_to_drive(memory.project_folder_id, memory.model_dump())
+            except Exception as exc:
+                logger.warning("refresh-context: Drive sync failed (non-fatal): %s", exc)
 
     # 2. Drop — clear the heavy per-turn full-text injections + stale scan state.
     async with _state_lock:
@@ -2993,8 +3039,8 @@ async def refresh_context():
         _last_request_user_tokens = 0
 
     logger.info(
-        "refresh-context: dropped %d loaded doc(s), %d scraped article(s), %d focused cache entr(ies); memory_flushed=%s",
-        len(dropped_doc_names), len(dropped_scraped_titles), focused_cleared, memory_flushed,
+        "refresh-context: dropped %d loaded doc(s), %d scraped article(s), %d focused cache entr(ies), %d chat turn(s); memory_flushed=%s",
+        len(dropped_doc_names), len(dropped_scraped_titles), focused_cleared, chat_turns_cleared, memory_flushed,
     )
 
     usage = await context_usage()
@@ -3006,6 +3052,8 @@ async def refresh_context():
         "dropped_docs_count": len(dropped_doc_names),
         "dropped_scraped": dropped_scraped_titles,
         "dropped_scraped_count": len(dropped_scraped_titles),
+        "chat_turns_cleared": chat_turns_cleared,
+        "project_loaded": _current_doc is not None or get_current_memory() is not None,
         "note": note,
         "context": usage,
     }

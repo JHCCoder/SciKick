@@ -1198,10 +1198,6 @@ async function updateContextUsage() {
 }
 
 async function refreshContext() {
-  if (!projectLoaded) {
-    showSystemMessage("💡 Load a project first to enable context management. You can still chat without one!");
-    return;
-  }
   dom.btnRefreshCtx.disabled = true;
   dom.btnRefreshCtx.textContent = "⏳";
 
@@ -1211,22 +1207,48 @@ async function refreshContext() {
     });
     if (res.ok) {
       const data = await res.json();
-      const dropped = (data.dropped_docs_count || 0) + (data.dropped_scraped_count || 0);
+      // Backstop for older servers that returned {"status":"no_memory",...}
+      // (HTTP 200, no `context`) when no session was active. Newer servers
+      // always return a `context`; this just avoids crashing on old ones.
+      if (data.status === "no_memory" || !data.context) {
+        showSystemMessage(
+          "⚠️ No active session on the server to refresh. Reload the project to reconnect."
+        );
+        return;
+      }
+      // Start a new conversation — clear the visible chat. The server already
+      // dropped the chat history, kept docs, and scraped pages from context;
+      // a digest of important points was saved to memory first (if any).
+      dom.messages.innerHTML = "";
+
       const parts = [];
       if (data.dropped_docs_count) parts.push(`${data.dropped_docs_count} kept doc(s)`);
       if (data.dropped_scraped_count) parts.push(`${data.dropped_scraped_count} scraped article(s)`);
-      const droppedLine = dropped
-        ? `Condensed and dropped ${parts.join(", ")} from context — saved to memory.`
-        : `No loaded documents or scraped articles to drop.`;
-      showSystemMessage(
-        `🔄 **Context freed**\n\n` +
-        droppedLine + (data.memory_flushed ? " Conversation digest saved." : "") +
-        `\nContext window: ${data.context.pct_free}% free (${data.context.remaining.toLocaleString()} tokens remaining).`
-      );
+      if (data.chat_turns_cleared) parts.push(`${data.chat_turns_cleared} chat turn(s)`);
+
+      if (data.project_loaded) {
+        const droppedLine = parts.length
+          ? `Dropped ${parts.join(", ")} from context.`
+          : `Context cleared.`;
+        showSystemMessage(
+          `🔄 **Refreshed — new conversation.** Project context kept.\n\n` +
+          droppedLine + (data.memory_flushed ? " Conversation digest saved to memory." : "") +
+          `\nContext window: ${data.context.pct_free}% free (${data.context.remaining.toLocaleString()} tokens remaining).`
+        );
+      } else {
+        showSystemMessage(
+          `🔄 **Refreshed — ready for a new conversation.**\n\n` +
+          (parts.length ? `Cleared ${parts.join(", ")}. ` : "") +
+          `Context window: ${data.context.pct_free}% free (${data.context.remaining.toLocaleString()} tokens remaining).`
+        );
+      }
+
       updateContextUsage();
       // Refresh the info panel so the Loaded Documents / Scraped Articles
       // sections visibly empty after the drop.
       if (!dom.infoPanel.classList.contains("hidden")) loadInfoPanel();
+      // The viewed file may no longer be kept — flip the scan button back to "Scan".
+      refreshScanButtonState();
     } else {
       showSystemMessage("⚠️ Could not refresh context.");
     }

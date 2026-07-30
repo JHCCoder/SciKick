@@ -98,6 +98,20 @@ def _make_pdf_with_figure() -> bytes:
     return doc.tobytes()
 
 
+def _make_docx_with_figure() -> bytes:
+    """A .docx with body text + an inline figure image that itself contains
+    text. Mirrors _make_pdf_with_figure for the DOCX figure-OCR path."""
+    import io
+    from docx import Document
+    doc = Document()
+    doc.add_paragraph("Main body text sentence one here enough chars.")
+    doc.add_picture(io.BytesIO(_figure_image_bytes()))
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+
 @pytest.fixture(autouse=True)
 def _reset_caches():
     """Start each test with a clean capability cache + empty parse cache."""
@@ -346,12 +360,59 @@ def test_figure_ocr_respects_cap(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# DOCX figure OCR (per-image OCR inside Word documents)
+# ---------------------------------------------------------------------------
+
+@needs_fitz
+@pytest.mark.skipif(not _ocr_available(), reason="OCR deps not installed")
+def test_docx_ocrs_embedded_figure_image():
+    from file_processor import parse_docx
+    doc = parse_docx(_make_docx_with_figure(), "fig.docx")
+    # Body text preserved.
+    assert "Main body text" in doc.full_text
+    # Figure text recovered inline via per-image OCR.
+    assert "[Figure text (OCR):" in doc.full_text
+    assert "42" in doc.full_text
+    assert doc.figure_ocr_count == 1
+
+
+@needs_fitz
+def test_docx_figure_ocr_skipped_when_unavailable(monkeypatch):
+    # Pretend the OCR group is missing — must not crash, no blocks emitted.
+    monkeypatch.setattr(
+        pdf_capabilities, "_CAPS_CACHE",
+        {"fast": True, "auto": False, "deep": False, "ocr_reason": "test-missing",
+         "renderer": None, "install_hint": "Run: ./start.sh --ocr"},
+    )
+    monkeypatch.setattr(pdf_capabilities, "_OCR_ENGINE", None)
+    monkeypatch.setattr(pdf_capabilities, "_OCR_ENGINE_TRIED", True)
+    from file_processor import parse_docx
+    doc = parse_docx(_make_docx_with_figure(), "fig.docx")
+    assert doc.figure_ocr_count == 0
+    assert "[Figure text (OCR):" not in doc.full_text
+    # Body text still present (degrades to captions/text only).
+    assert "Main body text" in doc.full_text
+
+
+@needs_fitz
+def test_docx_figure_ocr_off_still_extracts_text():
+    # Load Project passes figure_ocr=False: no per-image figure OCR, but text
+    # and captions are still extracted (on-demand opt-out, independent of
+    # whether the OCR deps are installed).
+    from file_processor import parse_docx
+    doc = parse_docx(_make_docx_with_figure(), "fig.docx", figure_ocr=False)
+    assert doc.figure_ocr_count == 0
+    assert "[Figure text (OCR):" not in doc.full_text
+    assert "Main body text" in doc.full_text
+
+
+# ---------------------------------------------------------------------------
 # Google Doc routing (export-as-PDF → parse_pdf, no Drive needed)
 # ---------------------------------------------------------------------------
 
 @needs_fitz
 @pytest.mark.skipif(not _ocr_available(), reason="OCR deps not installed")
-def test_gdoc_routes_through_parse_pdf_with_figure_ocr():
+def test_gdoc_load_skips_figure_ocr_but_scan_and_keep_runs_it():
     from drive_sync import _parse_downloaded
     pdf = _make_pdf_with_figure()
     file_dict = {
@@ -360,12 +421,19 @@ def test_gdoc_routes_through_parse_pdf_with_figure_ocr():
         "size": len(pdf),
     }
     downloaded = {"content_bytes": pdf.hex(), "mimeType": "application/pdf"}
-    doc = _parse_downloaded(file_dict, downloaded, pdf_mode="auto")
-    assert doc.parse_mode == "auto"
-    assert doc.raw_format == "pdf"
-    assert "Main body text" in doc.full_text
-    assert "42" in doc.full_text  # figure OCR ran via the gdoc→PDF→parse_pdf path
-    assert doc.figure_ocr_count == 1
+    # Load Project default (figure_ocr=False): text + page-level OCR only, no
+    # per-image figure OCR.
+    load_doc = _parse_downloaded(file_dict, downloaded, pdf_mode="auto")
+    assert load_doc.parse_mode == "auto"
+    assert load_doc.raw_format == "pdf"
+    assert "Main body text" in load_doc.full_text
+    assert load_doc.figure_ocr_count == 0
+    assert "42" not in load_doc.full_text
+    # Scan-and-keep (figure_ocr=True) engages per-image figure OCR via the
+    # gdoc→PDF→parse_pdf path.
+    keep_doc = _parse_downloaded(file_dict, downloaded, pdf_mode="auto", figure_ocr=True)
+    assert "42" in keep_doc.full_text
+    assert keep_doc.figure_ocr_count == 1
 
 
 @needs_fitz
