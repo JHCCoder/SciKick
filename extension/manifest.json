@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SciKick",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Your AI research sidekick. Accelerate scientific writing and discovery with context-aware AI.",
   "permissions": ["sidePanel", "storage", "tabs", "scripting"],
   "host_permissions": ["http://localhost:8742/*", "<all_urls>"],
