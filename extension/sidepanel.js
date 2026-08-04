@@ -1901,10 +1901,10 @@ async function detectCurrentTab(retries = 3) {
 }
 
 /**
- * Refresh the scan/unload button for the file currently viewed in the tab.
+ * Refresh the scan/update button for the file currently viewed in the tab.
  * If the file is already kept in the loaded-documents set, the button becomes
- * an "Unload" action; otherwise it stays "Scan". Routes to the same
- * /chat/loaded-docs endpoint as the ✕ button in the Loaded Data panel.
+ * an "Update" action (re-fetch the latest content from Drive); otherwise it
+ * stays "Scan".
  */
 async function refreshScanButtonState() {
   if (!viewingFile || !viewingFile.id) {
@@ -1920,8 +1920,8 @@ async function refreshScanButtonState() {
     }
   } catch (err) { /* ignore — default to scan mode */ }
   if (kept) {
-    dom.btnScanTab.textContent = "📤 Unload";
-    dom.btnScanTab.title = "Unload this file from context";
+    dom.btnScanTab.textContent = "🔄 Update";
+    dom.btnScanTab.title = "Update this file's context from Drive (cache-aware)";
     dom.btnScanTab.dataset.kept = "true";
   } else {
     dom.btnScanTab.textContent = "📌 Scan";
@@ -1929,6 +1929,41 @@ async function refreshScanButtonState() {
     dom.btnScanTab.dataset.kept = "false";
   }
   dom.btnScanTab.classList.remove("hidden");
+}
+
+/**
+ * Ask the server to re-fetch kept document(s) from Drive and refresh their
+ * context text. Cache-aware: only documents whose content actually changed are
+ * replaced — unchanged docs keep the exact same prompt bytes, so the provider's
+ * prefix cache keeps serving them at the cache-hit price.
+ *
+ * @param {string|null} fileId  Drive id of one kept doc, or null for all.
+ * @param {string|null} label   Human label for single-doc updates (tab bar).
+ */
+async function updateContext(fileId, label) {
+  const qs = fileId ? `?file_id=${encodeURIComponent(fileId)}` : "";
+  let res;
+  try {
+    res = await fetch(`${SERVER_URL}/chat/update-context${qs}`, { method: "POST" });
+  } catch (err) {
+    addMessage("system", `❌ Couldn't update context: ${err.message}`);
+    return;
+  }
+  const data = res.ok ? await res.json().catch(() => ({})) : {};
+  const updated = data.updated || [];
+  const unchanged = data.unchanged || [];
+  const failed = data.failed || [];
+  const prefix = label ? `${label}: ` : "";
+  const parts = [];
+  if (updated.length) parts.push(`✅ ${prefix}refreshed ${updated.length} (${updated.map(u => u.name).join(", ")})`);
+  if (unchanged.length) parts.push(`ℹ️ ${unchanged.length} unchanged — cache kept`);
+  if (failed.length) parts.push(`⚠️ ${failed.length} failed (${failed.map(f => f.name).join(", ")})`);
+  if (!parts.length) parts.push("No kept documents to update");
+  addMessage("system", parts.join(" · "));
+
+  updateContextUsage();
+  if (!dom.infoPanel.classList.contains("hidden")) loadInfoPanel();
+  refreshScanButtonState();
 }
 
 /**
@@ -1968,10 +2003,8 @@ function initTabBar() {
   dom.btnScanTab.addEventListener("click", async () => {
     if (!viewingFile || !viewingFile.id) return;
     if (dom.btnScanTab.dataset.kept === "true") {
-      // Already in context — unload it via the loaded-docs endpoint.
-      try {
-        await fetch(`${SERVER_URL}/chat/loaded-docs?file_id=${encodeURIComponent(viewingFile.id)}`, { method: "DELETE" });
-      } catch (err) { /* ignore */ }
+      // Already in context — refresh its content from Drive (cache-aware).
+      await updateContext(viewingFile.id, viewingFile.name);
       refreshScanButtonState();
       return;
     }
@@ -2238,7 +2271,7 @@ async function init() {
             await fetch(`${SERVER_URL}/chat/loaded-docs?index=${idx}`, { method: "DELETE" });
           } catch (err) { /* ignore */ }
           loadInfoPanel();
-          // Keep the tab-bar scan/unload label in sync with the change.
+          // Keep the tab-bar scan/update label in sync with the change.
           refreshScanButtonState();
         }
       }

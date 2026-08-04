@@ -663,19 +663,23 @@ _FOCUS_TRIGGERS = [
 ]
 
 
-async def _download_and_parse_file(file_id: str, file_name: str, figure_ocr: bool = True) -> str | None:
+async def _download_and_parse_file(file_id: str, file_name: str, figure_ocr: bool = True, force: bool = False) -> str | None:
     """Download and parse a project file from Drive. Returns parsed text or None.
 
     ``figure_ocr`` (default True) is forwarded to parse_pdf / parse_docx —
     scan-and-keep wants the full per-image figure-OCR treatment; one-shot focus
     scans pass False to stay fast. The cache is keyed by (file_id, figure_ocr)
     so a text-only focus result is never served for an OCR keep (or vice versa).
+
+    ``force`` (default False) bypasses the cache and re-downloads from Drive —
+    used by the update-context endpoint so an "update" actually picks up Drive
+    edits instead of returning the same cached bytes forever.
     """
     global _focused_file_cache
     cache_key = (file_id, figure_ocr)
 
-    # Return cached content if available
-    if cache_key in _focused_file_cache:
+    # Return cached content if available (unless the caller wants a fresh copy)
+    if not force and cache_key in _focused_file_cache:
         logger.info("Focus file: using cached content for '%s' (%s, figure_ocr=%s)", file_name, file_id, figure_ocr)
         return _focused_file_cache[cache_key]
 
@@ -3359,6 +3363,60 @@ async def remove_loaded_doc(index: int = None, file_id: str = None):
     _loaded_docs = []
     logger.info("Loaded-docs: cleared all (%d removed)", count)
     return {"status": "cleared", "removed": count}
+
+
+@router.post("/update-context")
+async def update_context(file_id: str = None):
+    """Re-fetch kept document(s) from Drive and refresh their context text.
+
+    Cache-aware refresh: a document is only replaced when its freshly parsed
+    text actually differs from what's kept. An unchanged file keeps the exact
+    same bytes, so the stable prompt prefix stays byte-identical and the
+    provider's prefix cache keeps serving it at the cache-hit price. Order is
+    preserved — a changed document invalidates the cache only from that
+    document onward.
+
+    Optional ``?file_id=...`` limits the refresh to one kept document; omit to
+    refresh all kept documents.
+    """
+    async with _state_lock:
+        if file_id:
+            if not _is_kept_doc(file_id):
+                raise HTTPException(status_code=404, detail=f"No loaded document with file_id {file_id}")
+            targets = [d for d in _loaded_docs if d["file_id"] == file_id]
+        else:
+            targets = list(_loaded_docs)
+        if not targets:
+            return {"updated": [], "unchanged": [], "failed": [], "note": "No kept documents to update"}
+
+        updated: list[dict] = []
+        unchanged: list[str] = []
+        failed: list[dict] = []
+        for doc in targets:
+            name = doc["name"]
+            old_text = doc["text"]
+            try:
+                # force=True re-downloads from Drive; the parse re-caches the
+                # fresh text so future one-shot scans see it too.
+                fresh = await _download_and_parse_file(
+                    doc["file_id"], name, figure_ocr=True, force=True
+                )
+            except Exception as exc:
+                logger.warning("Update-context: '%s' failed: %s", name, exc)
+                failed.append({"name": name, "error": str(exc)})
+                continue
+            if not fresh:
+                failed.append({"name": name, "error": "download or parse failed"})
+                continue
+            if fresh == old_text:
+                unchanged.append(name)
+                logger.info("Update-context: '%s' unchanged (%d chars) — cache preserved", name, len(fresh))
+            else:
+                doc["text"] = fresh
+                updated.append({"name": name, "chars": len(fresh)})
+                logger.info("Update-context: refreshed '%s' (%d -> %d chars)", name, len(old_text), len(fresh))
+
+    return {"updated": updated, "unchanged": unchanged, "failed": failed}
 
 
 @router.post("/reset")
