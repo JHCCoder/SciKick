@@ -21,6 +21,16 @@
             "statusMessage": "Preparing SciKick for Web Store submission…"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null)\" && bash \"$ROOT/.claude/hooks/promote-release.sh\" || exit 0",
+            "timeout": 1200,
+            "statusMessage": "Promoting the accepted SciKick release…"
+          }
+        ]
       }
     ]
   }
