@@ -2206,15 +2206,15 @@ def _build_user_message(
 
 # Known valid models per provider — used to give helpful suggestions on 404 / invalid-model errors.
 _PROVIDER_MODELS: dict[str, str] = {
-    "anthropic":  "claude-sonnet-4-6, claude-opus-4-8, claude-haiku-4-5",
+    "anthropic":  "claude-opus-5, claude-sonnet-5, claude-haiku-4-5, claude-fable-5",
     "deepseek":   "deepseek-v4-pro, deepseek-v4-flash",
-    "glm":        "glm-4-plus, glm-4-flash, glm-4-long, glm-4-air",
-    "openai":     "gpt-4o, gpt-4-turbo, gpt-3.5-turbo",
-    "gemini":     "gemini-2.0-flash, gemini-2.5-flash, gemini-2.5-pro",
-    "kimi":       "moonshot-v1-128k, kimi-k2-0905-preview, moonshot-v1-32k",
-    "grok":       "grok-4, grok-4-mini, grok-3, grok-3-mini",
-    "minimax":    "MiniMax-M2.5, MiniMax-M2.7, MiniMax-M3, MiniMax-Text-01",
-    "qwen":       "qwen-plus, qwen-max, qwen3-max, qwen-turbo",
+    "glm":        "glm-5, glm-5.1, glm-4.7, glm-4.6, glm-4-long, glm-4.5-air",
+    "openai":     "gpt-5, gpt-5.1, gpt-5.2, gpt-5.3, gpt-4.1, gpt-4o",
+    "gemini":     "gemini-3.5-flash, gemini-3-pro, gemini-3.1-pro, gemini-2.5-flash, gemini-2.5-pro",
+    "kimi":       "kimi-k3, kimi-k2.7-code, kimi-k2.6, kimi-k2.5",
+    "grok":       "grok-4.5, grok-4.3, grok-4.20, grok-4.1-fast",
+    "minimax":    "MiniMax-M3, MiniMax-M2.7, MiniMax-M2.5, MiniMax-M2.1",
+    "qwen":       "qwen3-max, qwen3.5-plus, qwen3.5-flash, qwen-plus, qwen-flash",
     # Local runtimes — model names depend on what the user has loaded.
     "local-ollama":   "llama3.1, qwen2.5, deepseek-r1 (whatever you `ollama pull`ed)",
     "local-lmstudio": "whatever model is loaded in the LM Studio GUI",
@@ -3043,20 +3043,55 @@ async def pdf_capabilities():
 
 # Approximate context window sizes per model (in tokens)
 MODEL_CONTEXT_WINDOWS = {
+    # anthropic — Opus/Sonnet/Fable 5: 1M; Haiku 4.5: 200K
+    "claude-opus-5": 1048576,
+    "claude-sonnet-5": 1048576,
+    "claude-haiku-4-5": 200000,
+    "claude-fable-5": 1048576,
+    # deepseek — v4 family: 1M
     "deepseek-v4-pro": 1048576,
     "deepseek-v4-flash": 1048576,
-    "glm-4-plus": 131072,
-    "glm-4-flash": 131072,
+    # glm — GLM-5/5.1/4.7/4.6: 200K; 4-Long: 1M; 4.5-Air: 128K
+    "glm-5": 200000,
+    "glm-5.1": 200000,
+    "glm-4.7": 200000,
+    "glm-4.6": 200000,
     "glm-4-long": 1048576,
-    "glm-4-air": 131072,
-    "claude-sonnet-4-6": 200000,
-    "claude-opus-4-8": 200000,
-    "claude-haiku-4-5": 200000,
-    "claude-fable-5": 200000,
+    "glm-4.5-air": 131072,
+    # openai — GPT-5 family: 400K; 4.1: 1M; 4o: 128K
+    "gpt-5": 400000,
+    "gpt-5.1": 400000,
+    "gpt-5.2": 400000,
+    "gpt-5.3": 400000,
+    "gpt-4.1": 1048576,
     "gpt-4o": 128000,
-    "gpt-4-turbo": 128000,
-    "gemini-2.0-flash": 1048576,
-    "moonshot-v1-128k": 131072,
+    # gemini — 3.x and 2.5: 1M
+    "gemini-3.5-flash": 1048576,
+    "gemini-3-pro": 1048576,
+    "gemini-3.1-pro": 1048576,
+    "gemini-2.5-flash": 1048576,
+    "gemini-2.5-pro": 1048576,
+    # kimi — K3: 1M; K2.5/2.6/2.7: 256K
+    "kimi-k3": 1048576,
+    "kimi-k2.7-code": 262144,
+    "kimi-k2.6": 262144,
+    "kimi-k2.5": 262144,
+    # grok — 4.5: 500K; 4.3: 1M; 4.20/4.1-fast: 2M
+    "grok-4.5": 524288,
+    "grok-4.3": 1048576,
+    "grok-4.20": 2097152,
+    "grok-4.1-fast": 2097152,
+    # minimax — M3: 1M; M2.x: 204,800
+    "MiniMax-M3": 1048576,
+    "MiniMax-M2.7": 204800,
+    "MiniMax-M2.5": 204800,
+    "MiniMax-M2.1": 204800,
+    # qwen — qwen3-max: 256K; 3.5-plus/plus/flash: 1M
+    "qwen3-max": 262144,
+    "qwen3.5-plus": 1048576,
+    "qwen3.5-flash": 1048576,
+    "qwen-plus": 1048576,
+    "qwen-flash": 1048576,
 }
 
 

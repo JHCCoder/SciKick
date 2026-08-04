@@ -44,7 +44,7 @@ GOOGLE_SCOPES = [
 # ---------------------------------------------------------------------------
 
 # Provider: "anthropic" | "deepseek" | "glm" | "openai" | "gemini" | "kimi" | "grok" | "minimax" | "qwen" | "custom"
-#   anthropic  → uses Anthropic SDK, model defaults to claude-sonnet-4-6
+#   anthropic  → uses Anthropic SDK, model defaults to claude-sonnet-5
 #   deepseek   → uses OpenAI-compatible SDK, base_url = https://api.deepseek.com
 #   glm        → uses OpenAI-compatible SDK, base_url = https://open.bigmodel.cn/api/paas/v4
 #   openai     → uses OpenAI SDK, base_url = https://api.openai.com/v1
@@ -71,7 +71,7 @@ LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
 # Provider defaults
 PROVIDER_DEFAULTS = {
     "anthropic": {
-        "model": "claude-sonnet-4-6",
+        "model": "claude-sonnet-5",
         "base_url": None,  # Anthropic SDK handles this
     },
     "deepseek": {
@@ -79,23 +79,23 @@ PROVIDER_DEFAULTS = {
         "base_url": "https://api.deepseek.com",
     },
     "glm": {
-        "model": "glm-4-plus",
+        "model": "glm-5",
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
     },
     "openai": {
-        "model": "gpt-4o",
+        "model": "gpt-5",
         "base_url": "https://api.openai.com/v1",
     },
     "gemini": {
-        "model": "gemini-2.0-flash",
+        "model": "gemini-3.5-flash",
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
     },
     "kimi": {
-        "model": "moonshot-v1-128k",
+        "model": "kimi-k2.5",
         "base_url": "https://api.moonshot.cn/v1",
     },
     "grok": {
-        "model": "grok-4",
+        "model": "grok-4.5",
         "base_url": "https://api.x.ai/v1",
     },
     "minimax": {
