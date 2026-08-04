@@ -11,6 +11,16 @@
             "statusMessage": "Refreshing SciKick LLM model tables…"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null)\" && bash \"$ROOT/.claude/hooks/prepare-submission.sh\" || exit 0",
+            "timeout": 1200,
+            "statusMessage": "Preparing SciKick for Web Store submission…"
+          }
+        ]
       }
     ]
   }
