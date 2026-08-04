@@ -103,7 +103,7 @@ async def _call_llm(message: str) -> str:
     provider = _get_provider()
     if _is_anthropic_provider(provider["provider"]):
         return await _sync_anthropic(
-            message, _SYSTEM_PROMPT, provider["model"], provider["api_key"]
+            "", message, _SYSTEM_PROMPT, provider["model"], provider["api_key"]
         )
     return await _sync_openai_compatible(
         message,
@@ -161,7 +161,7 @@ async def generate_project_summary(
     provider = _get_provider()
     if _is_anthropic_provider(provider["provider"]):
         text = await _sync_anthropic(
-            message, _SUMMARY_SYSTEM_PROMPT, provider["model"], provider["api_key"]
+            "", message, _SUMMARY_SYSTEM_PROMPT, provider["model"], provider["api_key"]
         )
     else:
         text = await _sync_openai_compatible(
@@ -298,7 +298,7 @@ async def _llm_call(message: str, system_prompt: str) -> str:
         provider = _get_provider()
         if _is_anthropic_provider(provider["provider"]):
             return await _sync_anthropic(
-                message, system_prompt, provider["model"], provider["api_key"]
+                "", message, system_prompt, provider["model"], provider["api_key"]
             )
         return await _sync_openai_compatible(
             message, system_prompt, provider["model"],

@@ -43,20 +43,23 @@ GOOGLE_SCOPES = [
 # LLM Provider — unified multi-provider configuration
 # ---------------------------------------------------------------------------
 
-# Provider: "anthropic" | "deepseek" | "glm" | "openai" | "gemini" | "kimi" | "custom"
+# Provider: "anthropic" | "deepseek" | "glm" | "openai" | "gemini" | "kimi" | "grok" | "minimax" | "qwen" | "custom"
 #   anthropic  → uses Anthropic SDK, model defaults to claude-sonnet-4-6
 #   deepseek   → uses OpenAI-compatible SDK, base_url = https://api.deepseek.com
 #   glm        → uses OpenAI-compatible SDK, base_url = https://open.bigmodel.cn/api/paas/v4
 #   openai     → uses OpenAI SDK, base_url = https://api.openai.com/v1
 #   gemini     → uses OpenAI-compatible SDK, base_url = https://generativelanguage.googleapis.com/v1beta/openai
 #   kimi       → uses OpenAI-compatible SDK, base_url = https://api.moonshot.cn/v1
+#   grok       → uses OpenAI-compatible SDK, base_url = https://api.x.ai/v1
+#   minimax    → uses OpenAI-compatible SDK, base_url = https://api.minimax.io/v1
+#   qwen       → uses OpenAI-compatible SDK, base_url = https://dashscope.aliyuncs.com/compatible-mode/v1
 #   custom     → uses OpenAI-compatible SDK, base_url = LLM_BASE_URL (required)
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic").lower()
 
 # API key — use the unified key, or fall back to provider-specific ones
 LLM_API_KEY = os.getenv(
     "LLM_API_KEY",
-    os.getenv("ANTHROPIC_API_KEY", os.getenv("DEEPSEEK_API_KEY", os.getenv("GLM_API_KEY", os.getenv("OPENAI_API_KEY", os.getenv("GEMINI_API_KEY", os.getenv("MOONSHOT_API_KEY", "")))))),
+    os.getenv("ANTHROPIC_API_KEY", os.getenv("DEEPSEEK_API_KEY", os.getenv("GLM_API_KEY", os.getenv("OPENAI_API_KEY", os.getenv("GEMINI_API_KEY", os.getenv("MOONSHOT_API_KEY", os.getenv("XAI_API_KEY", os.getenv("MINIMAX_API_KEY", os.getenv("DASHSCOPE_API_KEY", ""))))))))),
 )
 
 # Model name — if not set, auto-selected based on provider
@@ -90,6 +93,18 @@ PROVIDER_DEFAULTS = {
     "kimi": {
         "model": "moonshot-v1-128k",
         "base_url": "https://api.moonshot.cn/v1",
+    },
+    "grok": {
+        "model": "grok-4",
+        "base_url": "https://api.x.ai/v1",
+    },
+    "minimax": {
+        "model": "MiniMax-M2.5",
+        "base_url": "https://api.minimax.io/v1",
+    },
+    "qwen": {
+        "model": "qwen-plus",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     },
     "custom": {
         "model": "gpt-4o",  # user should override via LLM_MODEL

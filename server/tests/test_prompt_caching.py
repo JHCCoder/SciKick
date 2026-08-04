@@ -9,8 +9,11 @@ context is the prefix and every per-turn changing block sits in the tail:
     numbers, no digest-changing resume block),
   - the user message puts the stable Loaded Documents / Web-Scraped Papers
     blocks BEFORE the per-turn retrieved context and the user message,
-  - streaming requests set ``stream_options.include_usage`` (deepseek-v4 only)
-    so the cache hit/miss token counts can be read back and logged.
+  - streaming requests set ``stream_options.include_usage`` for every provider
+    that accepts it (deepseek, openai, gemini, glm, kimi) so the cache hit/miss
+    token counts can be read back and logged,
+  - Anthropic gets explicit ``cache_control`` breakpoints on the system block
+    and the byte-stable user-message prefix (see ``cache_split=True``).
 
 No network calls are made — the provider stream is stubbed.
 """
@@ -177,10 +180,16 @@ def test_stable_docs_precede_retrieved_context_and_question(monkeypatch):
     ("deepseek", "deepseek-v4-flash", "https://api.deepseek.com"),
     ("openai", "gpt-4o", "https://api.openai.com/v1"),
     ("gemini", "gemini-2.5-flash", "https://generativelanguage.googleapis.com/v1beta/openai"),
+    ("glm", "glm-4-flash", "https://open.bigmodel.cn/api/paas/v4"),
+    ("kimi", "moonshot-v1-128k", "https://api.moonshot.cn/v1"),
+    ("grok", "grok-4", "https://api.x.ai/v1"),
+    ("minimax", "MiniMax-M2.5", "https://api.minimax.io/v1"),
+    ("qwen", "qwen-plus", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
 ])
 def test_stream_requests_usage_for_caching_providers(monkeypatch, provider, model, base_url):
-    """DeepSeek / OpenAI / Gemini all accept stream_options.include_usage and
-    report cache token counts — request it so hits can be read back."""
+    """DeepSeek / OpenAI / Gemini / GLM / Kimi / Grok / MiniMax / Qwen all
+    accept stream_options.include_usage and report cache token counts — request
+    it so hits can be read back."""
     client = _StubClient([_fake_chunk(content="hi")])
     monkeypatch.setattr("openai.AsyncOpenAI", lambda *a, **k: client)
 
@@ -196,21 +205,58 @@ def test_stream_requests_usage_for_caching_providers(monkeypatch, provider, mode
 
 
 def test_stream_no_usage_field_for_other_providers(monkeypatch):
-    """Providers without documented include_usage support (glm, kimi, custom,
-    local) get no stream_options field at all — they may reject it."""
+    """Providers without documented include_usage support (custom, local) get
+    no stream_options field at all — they may reject it."""
     client = _StubClient([_fake_chunk(content="hi")])
     monkeypatch.setattr("openai.AsyncOpenAI", lambda *a, **k: client)
 
     async def run():
         await _collect(
             chat_handler._stream_openai_compatible(
-                "hi", "sys", "glm-4-flash", "k", "https://open.bigmodel.cn/api/paas/v4",
-                provider="glm",
+                "hi", "sys", "gpt-4o", "k", "https://example.com/v1",
+                provider="custom",
             )
         )
 
     asyncio.run(run())
     assert "stream_options" not in client.chat.completions.kwargs
+
+
+def test_qwen_sets_session_cache_header(monkeypatch):
+    """Qwen/DashScope's session cache is opt-in via a request header (off by
+    default) — send it so repeated stable prefixes actually hit the cache."""
+    client = _StubClient([_fake_chunk(content="hi")])
+    monkeypatch.setattr("openai.AsyncOpenAI", lambda *a, **k: client)
+
+    async def run():
+        await _collect(
+            chat_handler._stream_openai_compatible(
+                "hi", "sys", "qwen-plus", "k", "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                provider="qwen",
+            )
+        )
+
+    asyncio.run(run())
+    assert client.chat.completions.kwargs["extra_headers"] == {
+        "x-dashscope-session-cache": "enable"
+    }
+
+
+def test_non_qwen_providers_send_no_extra_headers(monkeypatch):
+    """Only providers in _PROVIDER_EXTRA_HEADERS get extra_headers — Grok (a
+    same-bucket caching provider) must not, so its request shape stays clean."""
+    client = _StubClient([_fake_chunk(content="hi")])
+    monkeypatch.setattr("openai.AsyncOpenAI", lambda *a, **k: client)
+
+    async def run():
+        await _collect(
+            chat_handler._stream_openai_compatible(
+                "hi", "sys", "grok-4", "k", "https://api.x.ai/v1", provider="grok",
+            )
+        )
+
+    asyncio.run(run())
+    assert "extra_headers" not in client.chat.completions.kwargs
 
 
 def test_stream_captures_deepseek_cache_hit_miss_tokens(monkeypatch):
@@ -245,12 +291,17 @@ def test_openai_cached_tokens_parsed_from_details():
     assert chat_handler._last_cache_miss_tokens == 300
 
 
-def test_gemini_cached_content_count_fallback():
-    """Gemini's native usage reports cached content under
-    cachedContentTokenCount (OpenAI-compat may or may not surface it)."""
-    usage = SimpleNamespace(cachedContentTokenCount=500)
+def test_gemini_cached_tokens_parsed_from_details():
+    """Gemini is reached via its OpenAI-compatible endpoint, so usage arrives
+    OpenAI-shaped (prompt_tokens_details.cached_tokens) — not the native
+    cachedContentTokenCount shape. Regression for the always-0 panel."""
+    usage = SimpleNamespace(
+        prompt_tokens=1200,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=900),
+    )
     chat_handler._record_cache_usage("gemini-2.5-flash", usage, provider="gemini")
-    assert chat_handler._last_cache_hit_tokens == 500
+    assert chat_handler._last_cache_hit_tokens == 900
+    assert chat_handler._last_cache_miss_tokens == 300
 
 
 def test_record_cache_usage_updates_meter_and_logs(caplog):
@@ -269,3 +320,115 @@ def test_record_cache_usage_none_is_noop():
     chat_handler._last_cache_hit_tokens = 42
     chat_handler._record_cache_usage("gpt-4o", None)
     assert chat_handler._last_cache_hit_tokens == 42
+
+
+def test_glm_cached_tokens_parsed_from_details():
+    """GLM (Zhipu) reports cache hits under OpenAI-shaped details on its
+    OpenAI-compatible /v4 endpoint."""
+    usage = SimpleNamespace(
+        prompt_tokens=1200,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=800),
+    )
+    chat_handler._record_cache_usage("glm-4-flash", usage, provider="glm")
+    assert chat_handler._last_cache_hit_tokens == 800
+    assert chat_handler._last_cache_miss_tokens == 400
+
+
+def test_kimi_cached_tokens_read_from_bare_usage():
+    """Kimi/Moonshot documents hits as usage.cached_tokens on the response;
+    the miss share is prompt_tokens minus the cached subset."""
+    usage = SimpleNamespace(prompt_tokens=1200, cached_tokens=750)
+    chat_handler._record_cache_usage("kimi-k2-0905-preview", usage, provider="kimi")
+    assert chat_handler._last_cache_hit_tokens == 750
+    assert chat_handler._last_cache_miss_tokens == 450
+
+
+def test_kimi_accepts_openai_style_details_too():
+    """Kimi also accepts the OpenAI-shaped details field when present."""
+    usage = SimpleNamespace(
+        prompt_tokens=1200,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=700),
+    )
+    chat_handler._record_cache_usage("kimi-k2-0905-preview", usage, provider="kimi")
+    assert chat_handler._last_cache_hit_tokens == 700
+    assert chat_handler._last_cache_miss_tokens == 500
+
+
+def test_anthropic_cache_counts_from_read_and_creation():
+    """Anthropic reports hits as cache_read_input_tokens; the uncached share is
+    input_tokens plus cache_creation_input_tokens (the paid first-request
+    write, at ~1.25x)."""
+    usage = SimpleNamespace(
+        input_tokens=400,
+        cache_read_input_tokens=900,
+        cache_creation_input_tokens=600,
+    )
+    chat_handler._record_cache_usage("claude-sonnet-4-6", usage, provider="anthropic")
+    assert chat_handler._last_cache_hit_tokens == 900
+    assert chat_handler._last_cache_miss_tokens == 1000  # 400 + 600
+
+
+@pytest.mark.parametrize("provider,model", [
+    ("grok", "grok-4"),
+    ("minimax", "MiniMax-M2.5"),
+    ("qwen", "qwen-plus"),
+])
+def test_new_providers_parse_openai_shaped_cached_tokens(provider, model):
+    """Grok / MiniMax / Qwen all report cache hits via the OpenAI-compatible
+    prompt_tokens_details.cached_tokens field."""
+    usage = SimpleNamespace(
+        prompt_tokens=1200,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=800),
+    )
+    chat_handler._record_cache_usage(model, usage, provider=provider)
+    assert chat_handler._last_cache_hit_tokens == 800
+    assert chat_handler._last_cache_miss_tokens == 400
+
+
+# ---------------------------------------------------------------------------
+# cache_split — the byte-stable prefix for explicit prompt caching
+# ---------------------------------------------------------------------------
+
+def test_cache_split_stable_plus_tail_equals_full():
+    """cache_split=True returns (full, stable, tail) where stable + tail == full
+    byte-for-byte, the kept docs live in the stable (cacheable) half, and the
+    per-turn blocks live in the tail. The non-split call is unchanged."""
+    chat_handler._loaded_docs = [
+        {"name": "Supp.docx", "text": "SUPP BODY " * 20, "file_id": "s1"}
+    ]
+
+    full, stable, tail = chat_handler._build_user_message(
+        message="question", current_file=None, session_focus=None, cache_split=True,
+    )
+    assert stable + tail == full
+    assert "## Loaded Documents" in stable
+    assert "## User Message" in tail
+    assert "## Context Window Status" in tail
+
+    plain = chat_handler._build_user_message(
+        message="question", current_file=None, session_focus=None
+    )
+    assert plain == full
+
+
+def test_cache_split_no_stable_returns_empty_stable():
+    """Without kept docs or scraped pages there is still a stable half (the
+    empty-state Loaded Documents block), so the invariant holds even then."""
+    full, stable, tail = chat_handler._build_user_message(
+        message="hi", current_file=None, session_focus=None, cache_split=True,
+    )
+    assert stable + tail == full
+    assert stable, "empty-state Loaded Documents block should be stable"
+
+
+def test_anthropic_content_blocks_cache_breakpoint_on_stable():
+    """The stable prefix gets the cache_control breakpoint; the tail is plain;
+    an empty stable degrades to a single uncached block."""
+    blocks = chat_handler._anthropic_content_blocks("STABLE\n", "TAIL")
+    assert blocks == [
+        {"type": "text", "text": "STABLE\n", "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "TAIL"},
+    ]
+    assert chat_handler._anthropic_content_blocks("", "only") == [
+        {"type": "text", "text": "only"}
+    ]

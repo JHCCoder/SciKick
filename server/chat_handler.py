@@ -2,7 +2,7 @@
 
 Supported providers:
   - anthropic (Anthropic SDK)
-  - deepseek, glm, openai, gemini, kimi, custom (OpenAI-compatible SDK)
+  - deepseek, glm, openai, gemini, kimi, grok, minimax, qwen, custom (OpenAI-compatible SDK)
 """
 
 from __future__ import annotations
@@ -1903,11 +1903,20 @@ def _build_user_message(
     focused_file_content: Optional[str] = None,
     full_manuscript_content: Optional[str] = None,
     clarification_text: Optional[str] = None,
-) -> str:
-    """Build the enriched user message with retrieved context."""
+    cache_split: bool = False,
+) -> str | tuple[str, str, str]:
+    """Build the enriched user message with retrieved context.
+
+    With ``cache_split=True`` returns ``(full, stable, tail)`` instead of the
+    plain string: ``stable`` is the byte-stable cross-turn prefix (kept docs +
+    scraped pages) and ``tail`` is the per-turn remainder, with
+    ``stable + tail == full`` byte-for-byte. Providers with explicit prompt
+    caching (Anthropic) put a ``cache_control`` breakpoint on ``stable``.
+    """
     global _current_doc, _current_comments, _image_cache, _keep_ack
 
     parts = []
+    stable_end = 0  # split point after the stable Loaded-Docs / Scraped blocks
 
     # Session focus — the user's chosen area of work for this session.
     # Skipped when a persisted project goal is set (the goal's ## Project Goal
@@ -2117,6 +2126,12 @@ def _build_user_message(
             parts.append(f"\n{body}\n")
             parts.append("---\n")
 
+    # Byte-stable prefix ends here: Loaded Documents + Web-Scraped Papers are
+    # resent unchanged across turns, while everything from Retrieved Context
+    # onward (retrieval, resume digest, the question, context status) changes
+    # per turn. Providers with explicit prompt caching split at this boundary.
+    stable_end = len(parts)
+
     # Retrieved context — skipped when asking a clarification (we don't want
     # the model answering from partial chunks instead of asking). Placed AFTER
     # the stable Loaded/Scraped blocks so the query-dependent retrieval text
@@ -2173,7 +2188,16 @@ def _build_user_message(
     if ctx_status:
         parts.append(ctx_status)
 
-    return "\n".join(parts)
+    full = "\n".join(parts)
+    if not cache_split:
+        return full
+    if stable_end == 0:
+        return full, "", full
+    # Trailing newline on the stable half keeps stable + tail == full exactly —
+    # content blocks are rendered contiguously, so the model sees identical bytes.
+    stable = "\n".join(parts[:stable_end]) + "\n"
+    tail = "\n".join(parts[stable_end:])
+    return full, stable, tail
 
 
 # ---------------------------------------------------------------------------
@@ -2188,6 +2212,9 @@ _PROVIDER_MODELS: dict[str, str] = {
     "openai":     "gpt-4o, gpt-4-turbo, gpt-3.5-turbo",
     "gemini":     "gemini-2.0-flash, gemini-2.5-flash, gemini-2.5-pro",
     "kimi":       "moonshot-v1-128k, kimi-k2-0905-preview, moonshot-v1-32k",
+    "grok":       "grok-4, grok-4-mini, grok-3, grok-3-mini",
+    "minimax":    "MiniMax-M2.5, MiniMax-M2.7, MiniMax-M3, MiniMax-Text-01",
+    "qwen":       "qwen-plus, qwen-max, qwen3-max, qwen-turbo",
     # Local runtimes — model names depend on what the user has loaded.
     "local-ollama":   "llama3.1, qwen2.5, deepseek-r1 (whatever you `ollama pull`ed)",
     "local-lmstudio": "whatever model is loaded in the LM Studio GUI",
@@ -2280,29 +2307,47 @@ def _enrich_error(error_message: str, provider: str, model: str) -> str:
 
 # Providers that accept stream_options.include_usage and report cache token
 # counts — others get no stream_options field at all (they may reject it).
-_USAGE_PROVIDERS = {"deepseek", "openai", "gemini"}
+_USAGE_PROVIDERS = {"deepseek", "openai", "gemini", "glm", "kimi", "grok", "minimax", "qwen"}
+
+# Per-provider extra HTTP headers. Qwen/DashScope's session cache is opt-in
+# (off by default) — this header enables it so repeated stable prefixes hit
+# the cache. Empty for every other provider.
+_PROVIDER_EXTRA_HEADERS: dict[str, dict[str, str]] = {
+    "qwen": {"x-dashscope-session-cache": "enable"},
+}
 
 
 def _cache_counts_from_usage(usage, provider: str) -> tuple[int, int]:
     """Extract (cache_hit_tokens, cache_miss_tokens) from a provider usage obj.
 
     Field names differ per provider:
-      - DeepSeek: prompt_cache_hit_tokens / prompt_cache_miss_tokens
-      - OpenAI:   prompt_tokens_details.cached_tokens (a subset of prompt_tokens)
-      - Gemini:   DeepSeek-style fields, else native cachedContentTokenCount
+      - Anthropic:  cache_read_input_tokens (hits) vs input_tokens plus
+        cache_creation_input_tokens (the paid cache write, uncached)
+      - DeepSeek:   prompt_cache_hit_tokens / prompt_cache_miss_tokens
+      - OpenAI/GLM/Gemini/Grok/MiniMax/Qwen (OpenAI-compat):
+        prompt_tokens_details.cached_tokens (a subset of prompt_tokens);
+        miss = prompt_tokens - hit
+      - Kimi/Moonshot: bare usage.cached_tokens, else OpenAI-shaped details
     Returns (0, 0) when the provider doesn't report cache fields.
     """
     if usage is None:
         return 0, 0
-    if provider == "openai":
+    if provider == "anthropic":
+        read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+        created = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+        uncached = int(getattr(usage, "input_tokens", 0) or 0)
+        return read, created + uncached
+    if provider in ("openai", "glm", "gemini", "kimi", "grok", "minimax", "qwen"):
         details = getattr(usage, "prompt_tokens_details", None)
         hit = int(getattr(details, "cached_tokens", 0) or 0) if details else 0
+        # Kimi/Moonshot also reports a bare usage.cached_tokens on the response.
+        if not hit:
+            hit = int(getattr(usage, "cached_tokens", 0) or 0)
         prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
         return hit, max(prompt - hit, 0)
+    # DeepSeek and anything unlisted: explicit hit/miss token fields.
     hit = int(getattr(usage, "prompt_cache_hit_tokens", 0) or 0)
     miss = int(getattr(usage, "prompt_cache_miss_tokens", 0) or 0)
-    if not hit:
-        hit = int(getattr(usage, "cachedContentTokenCount", 0) or 0)
     return hit, miss
 
 
@@ -2328,10 +2373,33 @@ def _record_cache_usage(model: str, usage, provider: str = "") -> None:
         )
 
 
+def _anthropic_content_blocks(stable: str, tail: str) -> list[dict]:
+    """Build Anthropic user content blocks with a cache breakpoint on the
+    byte-stable prefix. ``stable + tail`` is the full user message; the stable
+    block carries ``cache_control`` so repeated turns reuse it at the cache-hit
+    price. Uses 1 of the 4 allowed breakpoints per request (the system block
+    takes the other). An empty stable prefix degrades to a single block.
+    """
+    blocks: list[dict] = []
+    if stable:
+        blocks.append(
+            {"type": "text", "text": stable, "cache_control": {"type": "ephemeral"}}
+        )
+    if tail:
+        blocks.append({"type": "text", "text": tail})
+    return blocks or [{"type": "text", "text": ""}]
+
+
 async def _stream_anthropic(
-    message: str, system_prompt: str, model: str, api_key: str
+    stable: str, tail: str, system_prompt: str, model: str, api_key: str
 ) -> AsyncGenerator[str, None]:
-    """Stream using the Anthropic SDK."""
+    """Stream using the Anthropic SDK, with explicit prompt caching.
+
+    ``cache_control`` breakpoints go on the system block and the byte-stable
+    user-message prefix (kept docs + scraped pages) so repeated turns are
+    served from Anthropic's prompt cache. Cache reads/writes are recorded so
+    the context-usage meter shows the hit ratio.
+    """
     from anthropic import AsyncAnthropic
 
     client = AsyncAnthropic(api_key=api_key)
@@ -2340,12 +2408,24 @@ async def _stream_anthropic(
         async with client.messages.stream(
             model=model,
             max_tokens=8192,
-            system=system_prompt,
-            messages=[{"role": "user", "content": message}],
+            system=[{
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            messages=[{
+                "role": "user",
+                "content": _anthropic_content_blocks(stable, tail),
+            }],
             temperature=0.7,
         ) as stream:
             async for text in stream.text_stream:
                 yield f"data: {json.dumps({'type': 'text', 'content': text})}\n\n"
+
+        # The final message carries usage: cache_read_input_tokens (hits) and
+        # cache_creation_input_tokens (the paid write on the first request).
+        final = await stream.get_final_message()
+        _record_cache_usage(model, getattr(final, "usage", None), "anthropic")
 
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
@@ -2381,6 +2461,9 @@ async def _stream_openai_compatible(
         stream_kwargs = {}
         if provider in _USAGE_PROVIDERS:
             stream_kwargs["stream_options"] = {"include_usage": True}
+        headers = _PROVIDER_EXTRA_HEADERS.get(provider)
+        if headers:
+            stream_kwargs["extra_headers"] = headers
         stream = await client.chat.completions.create(
             model=model,
             messages=[
@@ -2442,19 +2525,27 @@ async def _stream_openai_compatible(
 # ---------------------------------------------------------------------------
 
 async def _sync_anthropic(
-    message: str, system_prompt: str, model: str, api_key: str
+    stable: str, tail: str, system_prompt: str, model: str, api_key: str
 ) -> str:
-    """Non-streaming call via Anthropic SDK."""
+    """Non-streaming call via Anthropic SDK, with explicit prompt caching."""
     from anthropic import AsyncAnthropic
 
     client = AsyncAnthropic(api_key=api_key)
     response = await client.messages.create(
         model=model,
         max_tokens=8192,
-        system=system_prompt,
-        messages=[{"role": "user", "content": message}],
+        system=[{
+            "type": "text",
+            "text": system_prompt,
+            "cache_control": {"type": "ephemeral"},
+        }],
+        messages=[{
+            "role": "user",
+            "content": _anthropic_content_blocks(stable, tail),
+        }],
         temperature=0.7,
     )
+    _record_cache_usage(model, getattr(response, "usage", None), "anthropic")
     return response.content[0].text
 
 
@@ -2470,6 +2561,8 @@ async def _sync_openai_compatible(
     # before any visible content, so give it a much larger budget than the
     # generic 8192 (see _stream_openai_compatible for the full context).
     max_tokens = 32768 if model.startswith("deepseek-v4") else 8192
+    headers = _PROVIDER_EXTRA_HEADERS.get(provider)
+    create_kwargs = {"extra_headers": headers} if headers else {}
     response = await client.chat.completions.create(
         model=model,
         messages=[
@@ -2478,6 +2571,7 @@ async def _sync_openai_compatible(
         ],
         temperature=0.7,
         max_tokens=max_tokens,
+        **create_kwargs,
     )
     _record_cache_usage(model, getattr(response, "usage", None), provider)
     return response.choices[0].message.content or ""
@@ -2583,7 +2677,12 @@ async def send_message(req: ChatRequest):
     _record_last_turn_scan(focused_file_content, full_manuscript_content, focus_id)
 
     system_prompt = _build_system_prompt()
-    user_message = _build_user_message(
+
+    # Anthropic places an explicit cache_control breakpoint on the byte-stable
+    # prefix, so split it out there; the full string still feeds the meter and
+    # logs, and the OpenAI-compatible path is unchanged.
+    split_for_cache = _is_anthropic_provider(provider["provider"])
+    built = _build_user_message(
         message=req.message,
         include_paper=req.include_paper_context,
         include_comments=req.include_reviewer_comments,
@@ -2593,7 +2692,13 @@ async def send_message(req: ChatRequest):
         focused_file_content=focused_file_content,
         full_manuscript_content=full_manuscript_content,
         clarification_text=clarification_text,
+        cache_split=split_for_cache,
     )
+    if split_for_cache:
+        user_message, stable_prefix, volatile_tail = built
+    else:
+        user_message = built
+        stable_prefix = volatile_tail = ""
 
     # Record the actual prompt size so the panel context meter reflects the
     # real next/last request (system + user), per the meter's contract.
@@ -2633,7 +2738,8 @@ async def send_message(req: ChatRequest):
 
     if _is_anthropic_provider(provider["provider"]):
         stream = _stream_anthropic(
-            user_message, system_prompt, provider["model"], provider["api_key"]
+            stable_prefix, volatile_tail, system_prompt,
+            provider["model"], provider["api_key"],
         )
     else:
         stream = _stream_openai_compatible(
@@ -2705,7 +2811,12 @@ async def send_message_sync(req: ChatRequest):
     _record_last_turn_scan(focused_file_content, full_manuscript_content, focus_id)
 
     system_prompt = _build_system_prompt()
-    user_message = _build_user_message(
+
+    # Anthropic places an explicit cache_control breakpoint on the byte-stable
+    # prefix, so split it out there; the full string still feeds the meter and
+    # logs, and the OpenAI-compatible path is unchanged.
+    split_for_cache = _is_anthropic_provider(provider["provider"])
+    built = _build_user_message(
         message=req.message,
         include_paper=req.include_paper_context,
         include_comments=req.include_reviewer_comments,
@@ -2715,7 +2826,13 @@ async def send_message_sync(req: ChatRequest):
         focused_file_content=focused_file_content,
         full_manuscript_content=full_manuscript_content,
         clarification_text=clarification_text,
+        cache_split=split_for_cache,
     )
+    if split_for_cache:
+        user_message, stable_prefix, volatile_tail = built
+    else:
+        user_message = built
+        stable_prefix = volatile_tail = ""
 
     # Record the actual prompt size so the panel context meter reflects the
     # real next/last request (system + user), per the meter's contract.
@@ -2724,7 +2841,8 @@ async def send_message_sync(req: ChatRequest):
     try:
         if _is_anthropic_provider(provider["provider"]):
             assistant_text = await _sync_anthropic(
-                user_message, system_prompt, provider["model"], provider["api_key"]
+                stable_prefix, volatile_tail, system_prompt,
+                provider["model"], provider["api_key"],
             )
         else:
             assistant_text = await _sync_openai_compatible(
@@ -2906,6 +3024,27 @@ async def list_providers():
                 "sdk": "OpenAI-compatible",
                 "models": "moonshot-v1-128k, kimi-k2-0905-preview, moonshot-v1-32k",
                 "env_vars": "LLM_API_KEY or MOONSHOT_API_KEY",
+            },
+            {
+                "id": "grok",
+                "name": "xAI (Grok)",
+                "sdk": "OpenAI-compatible",
+                "models": "grok-4, grok-4-mini, grok-3, grok-3-mini",
+                "env_vars": "LLM_API_KEY or XAI_API_KEY",
+            },
+            {
+                "id": "minimax",
+                "name": "MiniMax",
+                "sdk": "OpenAI-compatible",
+                "models": "MiniMax-M2.5, MiniMax-M2.7, MiniMax-M3, MiniMax-Text-01",
+                "env_vars": "LLM_API_KEY or MINIMAX_API_KEY",
+            },
+            {
+                "id": "qwen",
+                "name": "Alibaba (Qwen)",
+                "sdk": "OpenAI-compatible",
+                "models": "qwen-plus, qwen-max, qwen3-max, qwen-turbo",
+                "env_vars": "LLM_API_KEY or DASHSCOPE_API_KEY",
             },
             {
                 "id": "local-ollama",
