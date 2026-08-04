@@ -55,5 +55,6 @@ SciKick connects to local language models or cloud providers through your own AP
 * Support for 10+ cloud and local AI providers, from Claude and GPT to DeepSeek, Gemini, GLM, Kimi, Grok, MiniMax, and Qwen
 * Bring your own API key—no required subscriptions or vendor lock-in
 * One-click refresh of kept documents from Google Drive as you edit them
+* Automatic prefix caching—repeat turns on supported providers are faster and cheaper
 * Dark and light themes
 * No third-party servers required for your research workflow

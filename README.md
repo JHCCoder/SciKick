@@ -209,7 +209,7 @@ SciKick can chat with a model running entirely on your machine — fully private
 3. **Pick your local runtime** (Ollama / LM Studio / MLX) from the Provider dropdown. The Base URL is prefilled (`http://localhost:11434/v1` for Ollama, `:1234/v1` for LM Studio, `:8080/v1` for MLX) — edit it if your runtime uses a different port.
 4. **Set the model name** (e.g. `gemma3:27b`) and click **Save & Apply.** The API key field is hidden — leave it blank.
 
-> ⚠️ **Quality note:** Even strong local models (e.g. Gemma 3 27B) generally don't match Claude Sonnet / GPT-4-class cloud models on nuanced scientific revision. Use local for drafting, summarizing, and privacy; switch back to a cloud provider for heavy restructuring. **RAM rule of thumb** (4-bit quantized): ~1 GB per 7B params — a 32 GB machine comfortably runs up to ~14B, and can squeeze a 27B.
+> ⚠️ **Quality note:** Even strong local models (e.g. Gemma 3 27B) generally don't match Claude Sonnet / GPT-5-class cloud models on nuanced scientific revision. Use local for drafting, summarizing, and privacy; switch back to a cloud provider for heavy restructuring. **RAM rule of thumb** (4-bit quantized): ~1 GB per 7B params — a 32 GB machine comfortably runs up to ~14B, and can squeeze a 27B.
 
 ### Switching providers later
 
