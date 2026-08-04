@@ -2967,6 +2967,30 @@ def _goal_payload() -> Optional[dict]:
     return goal_payload()
 
 
+# Static display metadata for /chat/providers. `models` is NOT stored here —
+# it's derived from _PROVIDER_MODELS (the single source of truth for model IDs),
+# so a model refresh only edits that one table. `custom` has no _PROVIDER_MODELS
+# entry and falls back to a free-form hint.
+_PROVIDER_CATALOG: list[dict] = [
+    {"id": "openai", "name": "OpenAI (GPT)", "sdk": "OpenAI SDK", "env_vars": "LLM_API_KEY or OPENAI_API_KEY"},
+    {"id": "anthropic", "name": "Anthropic (Claude)", "sdk": "Anthropic SDK", "env_vars": "LLM_API_KEY or ANTHROPIC_API_KEY"},
+    {"id": "gemini", "name": "Google (Gemini)", "sdk": "OpenAI-compatible", "env_vars": "LLM_API_KEY or GEMINI_API_KEY"},
+    {"id": "deepseek", "name": "DeepSeek", "sdk": "OpenAI-compatible", "env_vars": "LLM_API_KEY or DEEPSEEK_API_KEY"},
+    {"id": "glm", "name": "Zhipu AI (GLM)", "sdk": "OpenAI-compatible", "env_vars": "LLM_API_KEY or GLM_API_KEY"},
+    {"id": "kimi", "name": "Moonshot AI (Kimi)", "sdk": "OpenAI-compatible", "env_vars": "LLM_API_KEY or MOONSHOT_API_KEY"},
+    {"id": "grok", "name": "xAI (Grok)", "sdk": "OpenAI-compatible", "env_vars": "LLM_API_KEY or XAI_API_KEY"},
+    {"id": "minimax", "name": "MiniMax", "sdk": "OpenAI-compatible", "env_vars": "LLM_API_KEY or MINIMAX_API_KEY"},
+    {"id": "qwen", "name": "Alibaba (Qwen)", "sdk": "OpenAI-compatible", "env_vars": "LLM_API_KEY or DASHSCOPE_API_KEY"},
+    {"id": "local-ollama", "name": "Ollama", "sdk": "OpenAI-compatible", "env_vars": "(none — local runtime, no key needed)"},
+    {"id": "local-lmstudio", "name": "LM Studio", "sdk": "OpenAI-compatible", "env_vars": "(none — local runtime, no key needed)"},
+    {"id": "local-mlx", "name": "MLX Server", "sdk": "OpenAI-compatible", "env_vars": "(none — local runtime, no key needed)"},
+    {"id": "custom", "name": "Others (OpenAI-compatible)", "sdk": "OpenAI-compatible SDK", "env_vars": "LLM_API_KEY + LLM_BASE_URL (required)"},
+]
+
+# Fallback `models` text for providers with no _PROVIDER_MODELS entry (custom).
+_CUSTOM_MODELS_HINT = "Any model your provider supports"
+
+
 @router.get("/providers")
 async def list_providers():
     """Return information about available and configured providers."""
@@ -2984,96 +3008,10 @@ async def list_providers():
         } if current else None,
         "available": [
             {
-                "id": "openai",
-                "name": "OpenAI (GPT)",
-                "sdk": "OpenAI SDK",
-                "models": "gpt-4o, gpt-4-turbo, gpt-3.5-turbo, etc.",
-                "env_vars": "LLM_API_KEY or OPENAI_API_KEY",
-            },
-            {
-                "id": "anthropic",
-                "name": "Anthropic (Claude)",
-                "sdk": "Anthropic SDK",
-                "models": "claude-sonnet-4-6, claude-opus-4-8, claude-haiku-4-5, etc.",
-                "env_vars": "LLM_API_KEY or ANTHROPIC_API_KEY",
-            },
-            {
-                "id": "gemini",
-                "name": "Google (Gemini)",
-                "sdk": "OpenAI-compatible",
-                "models": "gemini-2.0-flash, gemini-2.5-flash, gemini-2.5-pro",
-                "env_vars": "LLM_API_KEY or GEMINI_API_KEY",
-            },
-            {
-                "id": "deepseek",
-                "name": "DeepSeek",
-                "sdk": "OpenAI-compatible",
-                "models": "deepseek-v4-pro, deepseek-v4-flash",
-                "env_vars": "LLM_API_KEY or DEEPSEEK_API_KEY",
-            },
-            {
-                "id": "glm",
-                "name": "Zhipu AI (GLM)",
-                "sdk": "OpenAI-compatible",
-                "models": "glm-4-plus, glm-4-flash, glm-4-long, glm-4-air",
-                "env_vars": "LLM_API_KEY or GLM_API_KEY",
-            },
-            {
-                "id": "kimi",
-                "name": "Moonshot AI (Kimi)",
-                "sdk": "OpenAI-compatible",
-                "models": "moonshot-v1-128k, kimi-k2-0905-preview, moonshot-v1-32k",
-                "env_vars": "LLM_API_KEY or MOONSHOT_API_KEY",
-            },
-            {
-                "id": "grok",
-                "name": "xAI (Grok)",
-                "sdk": "OpenAI-compatible",
-                "models": "grok-4, grok-4-mini, grok-3, grok-3-mini",
-                "env_vars": "LLM_API_KEY or XAI_API_KEY",
-            },
-            {
-                "id": "minimax",
-                "name": "MiniMax",
-                "sdk": "OpenAI-compatible",
-                "models": "MiniMax-M2.5, MiniMax-M2.7, MiniMax-M3, MiniMax-Text-01",
-                "env_vars": "LLM_API_KEY or MINIMAX_API_KEY",
-            },
-            {
-                "id": "qwen",
-                "name": "Alibaba (Qwen)",
-                "sdk": "OpenAI-compatible",
-                "models": "qwen-plus, qwen-max, qwen3-max, qwen-turbo",
-                "env_vars": "LLM_API_KEY or DASHSCOPE_API_KEY",
-            },
-            {
-                "id": "local-ollama",
-                "name": "Ollama",
-                "sdk": "OpenAI-compatible",
-                "models": "llama3.1, qwen2.5, deepseek-r1, etc. (whatever you `ollama pull`ed)",
-                "env_vars": "(none — local runtime, no key needed)",
-            },
-            {
-                "id": "local-lmstudio",
-                "name": "LM Studio",
-                "sdk": "OpenAI-compatible",
-                "models": "whatever model is loaded in the LM Studio GUI",
-                "env_vars": "(none — local runtime, no key needed)",
-            },
-            {
-                "id": "local-mlx",
-                "name": "MLX Server",
-                "sdk": "OpenAI-compatible",
-                "models": "mlx-community/* model IDs (e.g. Llama-3.1-8B-Instruct-4bit)",
-                "env_vars": "(none — local runtime, no key needed)",
-            },
-            {
-                "id": "custom",
-                "name": "Others (OpenAI-compatible)",
-                "sdk": "OpenAI-compatible SDK",
-                "models": "Any model your provider supports",
-                "env_vars": "LLM_API_KEY + LLM_BASE_URL (required)",
-            },
+                **meta,
+                "models": _PROVIDER_MODELS.get(meta["id"], _CUSTOM_MODELS_HINT),
+            }
+            for meta in _PROVIDER_CATALOG
         ],
     }
 

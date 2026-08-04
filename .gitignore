@@ -30,7 +30,12 @@ Thumbs.db
 *.swo
 
 # Claude Code
-.claude/
+# settings.local.json stays ignored (personal); the shared hook, skill, and
+# settings.json are tracked so the "update models" workflow syncs via git.
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
+!.claude/skills/
 
 # Logs
 code_log.txt
