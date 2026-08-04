@@ -32,10 +32,11 @@ Whether you're preparing a new manuscript or responding to peer review, SciKick 
 - **Context-aware chat** — retrieves the most relevant sections of your paper per question, so you get smarter answers without burning through your context window
 - **Scan or keep any document** — one-shot `scan this file` for a single question, or `keep` a file in context across every turn. Bring in the supplement, protocols, or reviewer PDFs alongside your manuscript
 - **Live context meter** — see how much of the model's context window your next request will use, updated as you scan and keep documents
+- **Provider prefix caching** — the system prompt and your kept documents form a stable request prefix, so supporting providers (Claude, DeepSeek, OpenAI, Gemini, GLM, Kimi, Grok, MiniMax, Qwen) cache it and repeat turns are faster and cheaper
 - **Import web articles** — scrape a journal article from any website with one click and analyze it next to your project files
 - **Google Drive integration** — load papers, figures, and documents directly from Drive
 - **Cross-computer resume** — project memory saved to your Drive folder; pick up where you left off from any machine
-- **Cloud or local LLMs** — use a hosted provider (Claude, GPT, Gemini, DeepSeek, GLM, Kimi), any OpenAI-compatible endpoint, or run a model on your own machine via Ollama, LM Studio, or MLX — fully private, no API key needed for local
+- **Cloud or local LLMs** — use a hosted provider (Claude, GPT, Gemini, DeepSeek, GLM, Kimi, Grok, MiniMax, Qwen), any OpenAI-compatible endpoint, or run a model on your own machine via Ollama, LM Studio, or MLX — fully private, no API key needed for local
 - **Streaming responses** — real-time AI chat with streaming
 - **Dark and light themes**
 - **Runs entirely locally** — no third-party servers, no data collection
@@ -51,7 +52,7 @@ Whether you're preparing a new manuscript or responding to peer review, SciKick 
 ### Limitations
 
 - **Figure text is extracted, but not pure visuals** — In Auto/Deep mode, SciKick runs OCR on each embedded figure image and recovers the *text* inside it (axis labels, legend text, labels on a diagram, text in a screenshot). The AI can discuss figures using their captions, surrounding text, and that OCR'd figure text. It cannot, however, "see" purely visual content — exact data-point values read off a curve, microscopy detail, color/shape relationships. For that, paste a screenshot into the chat.
-- **Visual analysis workaround** — you can paste screenshots of figures directly into the chat for true visual analysis. This works with multi-modal LLMs like **Claude** (Sonnet 4, Opus 4, Fable 5) and **GPT-4o**.
+- **Visual analysis workaround** — you can paste screenshots of figures directly into the chat for true visual analysis. This works with multi-modal LLMs like **Claude** (Sonnet 5, Opus 5, Fable 5) and **GPT-5**.
 - **Scanned PDFs need the optional OCR tier** — the base install reads only the native text layer, so scanned/image-only PDFs come back empty until you run `./start.sh --ocr` (see [Notes on extraction](#notes-on-extraction)).
 - **Future plans** — Deep PDF parsing (layout, reading order, tables, formulas, figure–caption association via Docling) is on the roadmap.
 
@@ -66,7 +67,7 @@ Chrome Extension (side panel) ↔ Local Server (localhost:8742) ↔ Google Drive
 - **Server**: Python/FastAPI, runs on your machine
 - **Extension**: Chrome Manifest V3 side panel
 - **Memory**: `.scikick_memory.json` stored in your Google Drive project folder — preserves important discussions, decisions, and plans so you (or SciKick on another computer) can pick up where you left off
-- **AI**: multi-provider — Anthropic Claude, OpenAI, DeepSeek, GLM, Gemini, Kimi, any OpenAI-compatible API, or local LLMs (Ollama / LM Studio / MLX). You bring your own API key or run a local model — no required subscriptions, no vendor lock-in.
+- **AI**: multi-provider — Anthropic Claude, OpenAI, DeepSeek, GLM, Gemini, Kimi, Grok, MiniMax, Qwen, any OpenAI-compatible API, or local LLMs (Ollama / LM Studio / MLX). You bring your own API key or run a local model — no required subscriptions, no vendor lock-in.
 
 ---
 
@@ -175,16 +176,19 @@ You're in control of the AI model you use. SciKick connects to local language mo
 
 | Provider | Get API key / install at | Default model |
 |----------|--------------------------|---------------|
-| **Anthropic (Claude)** | [console.anthropic.com](https://console.anthropic.com/) | `claude-sonnet-4-6` |
+| **Anthropic (Claude)** | [console.anthropic.com](https://console.anthropic.com/) | `claude-sonnet-5` |
 | **DeepSeek** | [platform.deepseek.com](https://platform.deepseek.com/) | `deepseek-v4-pro` |
-| **Zhipu AI (GLM)** | [open.bigmodel.cn](https://open.bigmodel.cn/) | `glm-4-plus` |
-| **OpenAI (GPT-4o)** | [platform.openai.com](https://platform.openai.com/) | `gpt-4o` |
-| **Google (Gemini)** | [aistudio.google.com](https://aistudio.google.com/) (free tier available) | `gemini-2.0-flash` |
-| **Moonshot AI (Kimi)** | [platform.moonshot.cn](https://platform.moonshot.cn/) | `moonshot-v1-128k` |
+| **Zhipu AI (GLM)** | [open.bigmodel.cn](https://open.bigmodel.cn/) | `glm-5` |
+| **OpenAI (GPT-5)** | [platform.openai.com](https://platform.openai.com/) | `gpt-5` |
+| **Google (Gemini)** | [aistudio.google.com](https://aistudio.google.com/) (free tier available) | `gemini-3.5-flash` |
+| **Moonshot AI (Kimi)** | [platform.moonshot.cn](https://platform.moonshot.cn/) | `kimi-k2.5` |
+| **xAI (Grok)** | [console.x.ai](https://console.x.ai/) | `grok-4.5` |
+| **MiniMax** | [platform.minimaxi.com](https://platform.minimaxi.com/) | `MiniMax-M2.5` |
+| **Alibaba (Qwen)** | [bailian.console.aliyun.com](https://bailian.console.aliyun.com/) | `qwen-plus` |
 | **Local — Ollama** | [ollama.com](https://ollama.com/) (install) | `llama3.1` |
 | **Local — LM Studio** | [lmstudio.ai](https://lmstudio.ai/) (install) | (whatever model is loaded in the GUI) |
 | **Local — MLX Server** | [github.com/ml-explore/mlx-examples](https://github.com/ml-explore/mlx-examples) (install) | `mlx-community/Llama-3.1-8B-Instruct-4bit` |
-| **Custom** (Groq, Together, etc.) | Your provider | Any |
+| **Custom** (Groq, Together, Fireworks, or any OpenAI-compatible endpoint) | Your provider | Any |
 
 > 💡 Want support for a specific AI provider? Open an issue or start a discussion on GitHub — we can usually add it quickly.
 >
@@ -281,7 +285,7 @@ Before your first message of a session the bar shows a rough projection; after t
 - **PDF parsing has two tiers.** **Fast** (the default install) reads the PDF's native text layer — fast and always available, but returns nothing for scanned or image-only pages. **Auto** (optional) adds OCR in two ways: (1) **page-level** — when a page's text layer is empty or garbled, it renders the page and OCRs it so scanned supplements and image-only PDFs become readable; (2) **per-image figure OCR** — text embedded inside figure images (chart axis labels, screenshots of text, diagrams with labels) on any page is recovered by OCR'ing each embedded image. Google Docs are now exported as PDF and go through the same pipeline, so figures inside a Google Doc are OCR'd too. Auto is used automatically when installed; see [Enable scanned-PDF OCR](#enable-scanned-pdf-ocr-optional) below. (A third tier, **Deep** — layout/reading-order/table/formula reconstruction via Docling — is planned but not yet available.)
 - **Figure OCR limits.** Per-image figure OCR skips tiny images (logos/icons) and is capped per document (30 images) so figure-heavy papers don't stall the parse. Purely vector figures (no raster image to read) can't be OCR'd — their captions and surrounding text are still extracted as usual.
 - Very large files are capped per document, but the cap **scales with your model's context window** (roughly half the window for a one-shot scan, a quarter for a kept doc). On a 1M-token model a typical manuscript or supplement loads in full; on a 128k-token model the cap is ~256k characters. If a file exceeds the cap, only the first portion is loaded and the model will tell you it was truncated and suggest asking about a specific section for the rest.
-- Kept text is frozen at keep-time. If you edit a kept file on Drive, click **Load Project** (same folder — it preserves your kept list) and re-keep that file to refresh it.
+- Kept text is frozen at keep-time. If you edit a kept file on Drive, hit **🔄 Update** in the tab bar — SciKick re-downloads your kept documents from Drive and swaps in the fresh text (re-keeping the file also works).
 
 #### Enable scanned-PDF OCR (optional)
 
@@ -372,7 +376,7 @@ The top bar has five buttons (left to right):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LLM_PROVIDER` | `anthropic` | Provider: `anthropic`, `deepseek`, `glm`, `openai`, `gemini`, `kimi`, `local-ollama`, `local-lmstudio`, `local-mlx`, or `custom` |
+| `LLM_PROVIDER` | `anthropic` | Provider: `anthropic`, `deepseek`, `glm`, `openai`, `gemini`, `kimi`, `grok`, `minimax`, `qwen`, `local-ollama`, `local-lmstudio`, `local-mlx`, or `custom` |
 | `LLM_API_KEY` | (required for cloud) | Your API key — not needed for local providers |
 | `LLM_MODEL` | (provider default) | Model name override |
 | `LLM_BASE_URL` | (provider default) | Base URL — preset for local runtimes, required for `custom` |

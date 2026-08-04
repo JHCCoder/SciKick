@@ -41,7 +41,7 @@ Need additional context? SciKick can import selected research articles from the 
 
 You're in control of the AI model you use.
 
-SciKick connects to local language models or cloud providers through your own API credentials, including Anthropic Claude, OpenAI, DeepSeek, GLM, and OpenAI-compatible APIs. Choose the model that best fits your workflow, privacy requirements, and budget.
+SciKick connects to local language models or cloud providers through your own API credentials, including Anthropic Claude, OpenAI GPT, Google Gemini, DeepSeek, Zhipu GLM, Moonshot Kimi, xAI Grok, MiniMax, Alibaba Qwen, and any OpenAI-compatible API. Choose the model that best fits your workflow, privacy requirements, and budget.
 
 ## Why researchers choose SciKick
 
@@ -52,7 +52,8 @@ SciKick connects to local language models or cloud providers through your own AP
 * Recommendations for what to add and where to add it
 * Persistent project memory through **.scikick_memory.json**
 * Continue your work seamlessly across sessions and computers
-* Support for local and cloud AI models
+* Support for 10+ cloud and local AI providers, from Claude and GPT to DeepSeek, Gemini, GLM, Kimi, Grok, MiniMax, and Qwen
 * Bring your own API key—no required subscriptions or vendor lock-in
+* One-click refresh of kept documents from Google Drive as you edit them
 * Dark and light themes
 * No third-party servers required for your research workflow
