@@ -198,6 +198,12 @@ _last_request_tokens: int = 0
 _last_request_system_tokens: int = 0
 _last_request_user_tokens: int = 0
 
+# DeepSeek prefix-cache usage from the most recent request (0 until a provider
+# response reports it). Exposed via /context-usage so the panel can show how
+# much of the payload was served from the prefix cache at the cache-hit rate.
+_last_cache_hit_tokens: int = 0
+_last_cache_miss_tokens: int = 0
+
 # Phrases that signal "add this file to the persistent loaded set" (not just a
 # one-shot scan). Phrase-based, not bare words, so "keep it concise" / "add
 # this to the results" don't false-trigger.
@@ -516,28 +522,12 @@ def _build_system_prompt() -> str:
     except Exception:
         pass
 
-    # Context window awareness — let the model know how much room it has.
-    # include_transient=True so the model sees this turn's scan injection
-    # (the panel bar deliberately does NOT, to stay stable across turns).
-    try:
-        ctx = _estimate_context_usage(include_transient=True)
-        guidance = ""
-        if ctx["pct_used"] > 90:
-            guidance = " The window is almost full — be extremely concise (a few sentences at most)."
-        elif ctx["pct_used"] > 75:
-            guidance = " The window is getting full — keep your responses focused and avoid unnecessary detail."
-        elif ctx["pct_used"] > 50:
-            guidance = " You have moderate headroom — you can respond at normal length."
-        else:
-            guidance = " You have plenty of room — feel free to be thorough and expansive."
-        prompt += (
-            f"\n\n## Context Window Status\n"
-            f"Window: {ctx['window_size']:,} tokens | "
-            f"In use: ~{ctx['total_used']:,} tokens ({ctx['pct_used']}%) | "
-            f"Remaining: ~{ctx['remaining']:,} tokens.{guidance}"
-        )
-    except Exception:
-        pass
+    # NOTE: the per-turn "Context Window Status" guidance deliberately lives in
+    # the USER message tail (see _build_user_message), not here. The numbers
+    # change every turn, and a changing token near the front of the request
+    # would break DeepSeek's prefix cache for the entire stable payload below.
+    # Keeping the system prompt byte-stable is what lets repeated paper/docs
+    # context hit the cache at ~1/50th the input price.
 
     # Succinct project summary inferred at Load Project from the manuscript
     # title + sampled chunks. Gives the model a one-glance sense of what the
@@ -615,12 +605,43 @@ def _build_system_prompt() -> str:
         )
         prompt += structure_block
 
-    memory = get_current_memory()
-    if memory and memory.chat_history:
-        prompt += "\n\n" + RESUME_PROMPT_EXTENSION
-        prompt += "\n" + build_resume_context()
+    # NOTE: the "Session Resumed" digest block also moved to the user message
+    # tail (_build_user_message) — it changes whenever the ~2-min digest runs,
+    # and the same cache-prefix argument applies. The system prompt above is
+    # now byte-stable across turns (modulo transient goal-onboarding states).
 
     return prompt
+
+
+def _context_status_block() -> str:
+    """The per-turn "Context Window Status" guidance for the model.
+
+    Extracted so it can be appended at the very END of the user message rather
+    than in the system prompt: the numbers change every turn, and any changing
+    token before the stable document blocks would break the provider's prefix
+    cache. ``include_transient=True`` so the model sees this turn's scan
+    injection (the panel bar deliberately does NOT, to stay stable across
+    turns).
+    """
+    try:
+        ctx = _estimate_context_usage(include_transient=True)
+        guidance = ""
+        if ctx["pct_used"] > 90:
+            guidance = " The window is almost full — be extremely concise (a few sentences at most)."
+        elif ctx["pct_used"] > 75:
+            guidance = " The window is getting full — keep your responses focused and avoid unnecessary detail."
+        elif ctx["pct_used"] > 50:
+            guidance = " You have moderate headroom — you can respond at normal length."
+        else:
+            guidance = " You have plenty of room — feel free to be thorough and expansive."
+        return (
+            f"\n\n## Context Window Status\n"
+            f"Window: {ctx['window_size']:,} tokens | "
+            f"In use: ~{ctx['total_used']:,} tokens ({ctx['pct_used']}%) | "
+            f"Remaining: ~{ctx['remaining']:,} tokens.{guidance}"
+        )
+    except Exception:
+        return ""
 
 
 # Trigger words/phrases that signal the user wants full file content.
@@ -1997,40 +2018,6 @@ def _build_user_message(
         except Exception:
             pass
 
-    # Retrieved context — skipped when asking a clarification (we don't want
-    # the model answering from partial chunks instead of asking).
-    if not clarification_text and _current_doc and (include_paper or include_comments):
-        memory = get_current_memory()
-        chat_history = memory.chat_history if memory else []
-
-        # When the full manuscript is already injected above (one-shot deep
-        # scan) OR the manuscript is kept in full (in ## Loaded Documents),
-        # skip the top-k paper-chunk retrieval (redundant) — still pull
-        # reviewer comments and recent chat history.
-        skip_paper_chunks = bool(full_manuscript_content) or _manuscript_is_kept()
-        # Non-manuscript project docs are chunk-searched every turn with a
-        # type-weighted budget (supplements/supporting). Exclude any file the
-        # user already kept in _loaded_docs — its full text is injected
-        # separately below, so chunk-retrieving it would be redundant.
-        kept_ids = {d["file_id"] for d in _loaded_docs}
-        extra_docs = [
-            (d["type"], d["doc"])
-            for d in _project_docs
-            if d.get("file_id") not in kept_ids
-        ]
-        context = retrieve_context(
-            query=message,
-            doc=_current_doc,
-            comments=_current_comments,
-            chat_history=[t.model_dump() for t in chat_history],
-            include_paper_chunks=not skip_paper_chunks,
-            extra_docs=extra_docs,
-            extra_budget={"supplement": 2, "supporting": 2, "miscellaneous": 1},
-        )
-        if context:
-            parts.append(context)
-            parts.append("---\n")
-
     # Loaded documents — project files the user asked to keep in context
     # across turns. Injected every turn (like web-scraped papers), capped
     # per-doc so a few large files don't blow the budget. Distinct from the
@@ -2126,8 +2113,61 @@ def _build_user_message(
             parts.append(f"\n{body}\n")
             parts.append("---\n")
 
+    # Retrieved context — skipped when asking a clarification (we don't want
+    # the model answering from partial chunks instead of asking). Placed AFTER
+    # the stable Loaded/Scraped blocks so the query-dependent retrieval text
+    # sits in the changing tail of the request: the stable document prefix
+    # above is what DeepSeek's cache serves at the cache-hit rate.
+    if not clarification_text and _current_doc and (include_paper or include_comments):
+        memory = get_current_memory()
+        chat_history = memory.chat_history if memory else []
+
+        # When the full manuscript is already injected above (one-shot deep
+        # scan) OR the manuscript is kept in full (in ## Loaded Documents),
+        # skip the top-k paper-chunk retrieval (redundant) — still pull
+        # reviewer comments and recent chat history.
+        skip_paper_chunks = bool(full_manuscript_content) or _manuscript_is_kept()
+        # Non-manuscript project docs are chunk-searched every turn with a
+        # type-weighted budget (supplements/supporting). Exclude any file the
+        # user already kept in _loaded_docs — its full text is already injected
+        # above, so chunk-retrieving it would be redundant.
+        kept_ids = {d["file_id"] for d in _loaded_docs}
+        extra_docs = [
+            (d["type"], d["doc"])
+            for d in _project_docs
+            if d.get("file_id") not in kept_ids
+        ]
+        context = retrieve_context(
+            query=message,
+            doc=_current_doc,
+            comments=_current_comments,
+            chat_history=[t.model_dump() for t in chat_history],
+            include_paper_chunks=not skip_paper_chunks,
+            extra_docs=extra_docs,
+            extra_budget={"supplement": 2, "supporting": 2, "miscellaneous": 1},
+        )
+        if context:
+            parts.append(context)
+            parts.append("---\n")
+
+    # Resumed-session digest (conversation summary, decisions, comment status).
+    # Changes only when the ~2-min digest runs, so it lives in the tail too —
+    # a stable system prompt + stable document blocks are the cacheable prefix.
+    memory = get_current_memory()
+    if memory and memory.chat_history:
+        parts.append(RESUME_PROMPT_EXTENSION)
+        parts.append(build_resume_context())
+        parts.append("---\n")
+
     # The user's actual message
     parts.append(f"## User Message\n{message}")
+
+    # Context window awareness — model's own "how much room do I have" signal.
+    # The numbers change every turn, so this must sit at the very tail: any
+    # changing token before the stable blocks would break the cache prefix.
+    ctx_status = _context_status_block()
+    if ctx_status:
+        parts.append(ctx_status)
 
     return "\n".join(parts)
 
@@ -2234,6 +2274,56 @@ def _enrich_error(error_message: str, provider: str, model: str) -> str:
 # Provider-specific streaming implementations
 # ---------------------------------------------------------------------------
 
+# Providers that accept stream_options.include_usage and report cache token
+# counts — others get no stream_options field at all (they may reject it).
+_USAGE_PROVIDERS = {"deepseek", "openai", "gemini"}
+
+
+def _cache_counts_from_usage(usage, provider: str) -> tuple[int, int]:
+    """Extract (cache_hit_tokens, cache_miss_tokens) from a provider usage obj.
+
+    Field names differ per provider:
+      - DeepSeek: prompt_cache_hit_tokens / prompt_cache_miss_tokens
+      - OpenAI:   prompt_tokens_details.cached_tokens (a subset of prompt_tokens)
+      - Gemini:   DeepSeek-style fields, else native cachedContentTokenCount
+    Returns (0, 0) when the provider doesn't report cache fields.
+    """
+    if usage is None:
+        return 0, 0
+    if provider == "openai":
+        details = getattr(usage, "prompt_tokens_details", None)
+        hit = int(getattr(details, "cached_tokens", 0) or 0) if details else 0
+        prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+        return hit, max(prompt - hit, 0)
+    hit = int(getattr(usage, "prompt_cache_hit_tokens", 0) or 0)
+    miss = int(getattr(usage, "prompt_cache_miss_tokens", 0) or 0)
+    if not hit:
+        hit = int(getattr(usage, "cachedContentTokenCount", 0) or 0)
+    return hit, miss
+
+
+def _record_cache_usage(model: str, usage, provider: str = "") -> None:
+    """Capture prefix-cache hit/miss token counts and log them.
+
+    The ratio tells us whether the cache-optimized prompt ordering is working —
+    a high hit share means the stable prefix (system prompt + kept docs) is
+    being served from cache at the cache-hit price. Providers without prefix
+    caching simply lack the fields; nothing is recorded.
+    """
+    global _last_cache_hit_tokens, _last_cache_miss_tokens
+    if usage is None:
+        return
+    hit, miss = _cache_counts_from_usage(usage, provider)
+    _last_cache_hit_tokens = hit
+    _last_cache_miss_tokens = miss
+    if hit or miss:
+        total = hit + miss
+        logger.info(
+            "Context cache [%s]: %d hit / %d miss tokens (%.1f%% cached)",
+            model, hit, miss, (hit / total) * 100 if total else 0.0,
+        )
+
+
 async def _stream_anthropic(
     message: str, system_prompt: str, model: str, api_key: str
 ) -> AsyncGenerator[str, None]:
@@ -2262,14 +2352,31 @@ async def _stream_anthropic(
 
 
 async def _stream_openai_compatible(
-    message: str, system_prompt: str, model: str, api_key: str, base_url: str
+    message: str, system_prompt: str, model: str, api_key: str, base_url: str,
+    provider: str = "",
 ) -> AsyncGenerator[str, None]:
     """Stream using the OpenAI-compatible SDK (DeepSeek, OpenAI, Groq, etc.)."""
     from openai import AsyncOpenAI
 
     client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
+    # DeepSeek v4 models (pro/flash) default to thinking mode ON: chain-of-
+    # thought streams in delta.reasoning_content while delta.content stays
+    # empty until the model finishes reasoning. The old 8192-token budget
+    # could be exhausted by thinking alone — the stream then ended with ZERO
+    # content and the user saw a silent empty reply. Give thinking + answer
+    # room, and stream a "thinking" marker so the panel shows progress.
+    thinking_model = model.startswith("deepseek-v4")
+    max_tokens = 32768 if thinking_model else 8192
+
     try:
+        # Providers with prefix caching stream a final usage chunk (empty
+        # choices) with cache hit/miss tokens when include_usage is set. Only
+        # sent to providers known to accept it (DeepSeek/OpenAI/Gemini) —
+        # others get no stream_options field at all.
+        stream_kwargs = {}
+        if provider in _USAGE_PROVIDERS:
+            stream_kwargs["stream_options"] = {"include_usage": True}
         stream = await client.chat.completions.create(
             model=model,
             messages=[
@@ -2277,14 +2384,38 @@ async def _stream_openai_compatible(
                 {"role": "user", "content": message},
             ],
             temperature=0.7,
-            max_tokens=8192,
+            max_tokens=max_tokens,
             stream=True,
+            **stream_kwargs,
         )
 
+        usage = None
+        yielded_text = False
+        yielded_thinking = False
         async for chunk in stream:
+            if getattr(chunk, "usage", None):
+                usage = chunk.usage
             delta = chunk.choices[0].delta if chunk.choices else None
-            if delta and delta.content:
+            if not delta:
+                continue
+            if delta.content:
+                yielded_text = True
                 yield f"data: {json.dumps({'type': 'text', 'content': delta.content})}\n\n"
+            elif not yielded_text and getattr(delta, "reasoning_content", None):
+                # Reasoning model mid-thought — emit a one-shot progress marker
+                # so the panel isn't dead air during a long chain-of-thought.
+                if not yielded_thinking:
+                    yielded_thinking = True
+                    yield f"data: {json.dumps({'type': 'thinking', 'content': ''})}\n\n"
+
+        if not yielded_text:
+            # Model consumed its output budget reasoning and returned no text —
+            # surface it explicitly instead of a silent empty bubble.
+            yield f"data: {json.dumps({'type': 'warning', 'content': 'The model returned an empty response — it spent its output budget reasoning and produced no text. Try rephrasing the question or asking about a narrower part of the document.'})}\n\n"
+
+        # Capture how much of this request's input was served from the prefix
+        # cache (reported in the final usage chunk by caching providers).
+        _record_cache_usage(model, usage, provider)
 
         yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
@@ -2324,12 +2455,17 @@ async def _sync_anthropic(
 
 
 async def _sync_openai_compatible(
-    message: str, system_prompt: str, model: str, api_key: str, base_url: str
+    message: str, system_prompt: str, model: str, api_key: str, base_url: str,
+    provider: str = "",
 ) -> str:
     """Non-streaming call via OpenAI-compatible SDK."""
     from openai import AsyncOpenAI
 
     client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+    # DeepSeek v4 defaults to thinking mode — reasoning consumes output tokens
+    # before any visible content, so give it a much larger budget than the
+    # generic 8192 (see _stream_openai_compatible for the full context).
+    max_tokens = 32768 if model.startswith("deepseek-v4") else 8192
     response = await client.chat.completions.create(
         model=model,
         messages=[
@@ -2337,8 +2473,9 @@ async def _sync_openai_compatible(
             {"role": "user", "content": message},
         ],
         temperature=0.7,
-        max_tokens=8192,
+        max_tokens=max_tokens,
     )
+    _record_cache_usage(model, getattr(response, "usage", None), provider)
     return response.choices[0].message.content or ""
 
 
@@ -2501,6 +2638,7 @@ async def send_message(req: ChatRequest):
             provider["model"],
             provider["api_key"],
             provider["base_url"],
+            provider=provider["provider"],
         )
 
     # Wrap so the exchange is buffered to memory on successful completion
@@ -2591,11 +2729,25 @@ async def send_message_sync(req: ChatRequest):
                 provider["model"],
                 provider["api_key"],
                 provider["base_url"],
+                provider=provider["provider"],
             )
     except Exception as exc:
         enriched = _enrich_error(str(exc), provider["provider"], provider["model"])
         logger.error("LLM API error: %s", exc)
         raise HTTPException(status_code=502, detail=enriched)
+
+    if not assistant_text:
+        # Thinking-mode models can burn their whole output budget reasoning and
+        # return zero content (see _stream_openai_compatible). Surface it rather
+        # than silently recording an empty exchange.
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "The model returned an empty response — it spent its output budget "
+                "reasoning and produced no text. Try rephrasing the question or "
+                "asking about a narrower part of the document."
+            ),
+        )
 
     # Update memory (await — Drive sync runs in thread pool)
     await update_memory_after_chat(
@@ -2925,6 +3077,13 @@ async def context_usage():
         "remaining": remaining,
         "pct_used": pct_used,
         "pct_free": round(100 - pct_used, 1),
+        # DeepSeek prefix-cache usage from the last request (0 until reported).
+        # hit_pct shows how much of the input was served from cache at the
+        # cache-hit price — a proxy for how well the prompt ordering works.
+        "cache_hit_tokens": _last_cache_hit_tokens,
+        "cache_miss_tokens": _last_cache_miss_tokens,
+        "cache_hit_pct": round((_last_cache_hit_tokens / (_last_cache_hit_tokens + _last_cache_miss_tokens)) * 100, 1)
+        if (_last_cache_hit_tokens + _last_cache_miss_tokens) > 0 else None,
         "manuscript_available": _current_doc is not None,
         "manuscript_total_chars": len(_current_doc.full_text) if _current_doc else 0,
         "scraped_papers_count": len(_scraped_docs),
