@@ -107,6 +107,11 @@ body {
   to { transform: rotate(360deg); }
 }
 
+@keyframes fadeInPulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
 #topbar #btn-power.spinning {
   animation: spin 1s linear infinite;
 }
@@ -815,6 +820,20 @@ body {
 }
 .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
 .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+/* "Thinking…" marker shown while a reasoning model (DeepSeek v4) streams
+   chain-of-thought before any visible text. Replaces the typing dots so the
+   panel shows progress instead of dead air during a long chain-of-thought. */
+.thinking-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-style: italic;
+  animation: fadeInPulse 1.6s ease-in-out infinite;
+}
 
 /* Remove old typing indicator (no longer used) */
 #typing-indicator { display: none; }

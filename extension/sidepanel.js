@@ -824,6 +824,7 @@ async function sendMessage() {
 
   let assistantBubble = null;
   let gotText = false;   // becomes true once any real content streams in
+  let thinkingShown = false; // true once the "Thinking…" indicator replaces the typing dots
 
   try {
     assistantBubble = addMessage("assistant", "", true);
@@ -870,38 +871,64 @@ async function sendMessage() {
       buffer = lines.pop() || "";
 
       for (const line of lines) {
-        if (line.startsWith("data: ")) {
-          try {
-            const data = JSON.parse(line.slice(6));
-            if (data.type === "text") {
-              // replace=true → reset the bubble to just this content (used by
-              // the goal-finalize stream to swap the interim "Looking up…"
-              // line for the final recap, instead of appending to it).
-              if (data.replace) {
-                fullResponse = data.content;
-              } else {
-                fullResponse += data.content;
-              }
-              gotText = true;
-              renderAssistantMessage(assistantBubble, fullResponse);
-            } else if (data.type === "error") {
-              fullResponse += `\n\n⚠️ Error: ${data.content}`;
-              gotText = true;
-              renderAssistantMessage(assistantBubble, fullResponse);
-            } else if (data.type === "goal_buttons") {
-              // "change goal" intercept — re-show the mode picker after the
-              // text message above has been rendered.
-              showGoalOnboarding();
-            }
-          } catch (e) {
-            // partial JSON, ignore
+        if (!line.startsWith("data: ")) continue;
+
+        let data;
+        try {
+          data = JSON.parse(line.slice(6));
+        } catch (e) {
+          // Partial JSON across a chunk boundary — wait for the rest of the line.
+          continue;
+        }
+
+        if (data.type === "text") {
+          // replace=true → reset the bubble to just this content (used by
+          // the goal-finalize stream to swap the interim "Looking up…"
+          // line for the final recap, instead of appending to it).
+          if (data.replace) {
+            fullResponse = data.content;
+          } else {
+            fullResponse += data.content;
           }
+          gotText = true;
+          renderAssistantMessage(assistantBubble, fullResponse);
+        } else if (data.type === "thinking") {
+          // Reasoning model (DeepSeek v4) is working through chain-of-thought
+          // before any visible text — swap the typing dots for a progress
+          // marker so the panel shows it's alive instead of dead air.
+          if (!thinkingShown && assistantBubble) {
+            thinkingShown = true;
+            assistantBubble.innerHTML = '<div class="thinking-indicator">🧠 Thinking…</div>';
+            scrollToBottom();
+          }
+        } else if (data.type === "warning") {
+          // Stream succeeded but produced no text (e.g. the model exhausted
+          // its output budget reasoning) — surface it instead of silence.
+          fullResponse += `\n\n⚠️ ${data.content}`;
+          gotText = true;
+          renderAssistantMessage(assistantBubble, fullResponse);
+        } else if (data.type === "error") {
+          fullResponse += `\n\n⚠️ Error: ${data.content}`;
+          gotText = true;
+          renderAssistantMessage(assistantBubble, fullResponse);
+        } else if (data.type === "goal_buttons") {
+          // "change goal" intercept — re-show the mode picker after the
+          // text message above has been rendered.
+          showGoalOnboarding();
         }
       }
     }
 
     // Memory is now persisted server-side on stream completion (the /send
     // path is self-contained), so no follow-up /memory/update is needed here.
+
+    // If the stream ended with no content and no warning/error was surfaced
+    // (defensive — the server now sends a warning for empty completions),
+    // drop the empty bubble and say so instead of leaving typing dots forever.
+    if (!gotText && assistantBubble && assistantBubble.parentElement) {
+      assistantBubble.parentElement.remove();
+      addMessage("system", "⚠️ The assistant returned an empty response — the model likely spent its output budget reasoning. Try rephrasing or asking about a narrower part of the document.");
+    }
 
     // Refresh context usage
     updateContextUsage();
