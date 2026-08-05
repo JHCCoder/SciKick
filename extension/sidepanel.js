@@ -36,6 +36,7 @@ let sessionFocus = null; // "brainstorming" | "paper_discussion" | "paper_writin
 let currentStream = null; // AbortController for SSE
 let loadingInProgress = false; // true during loadProject / scrape — suppress disconnect banner
 let generating = false; // true while an LLM response is streaming — locks input + scan (ChatGPT-style)
+let contextUpdating = false; // true while the Update button's Drive refresh is in flight — locks the Scan/Update button
 let healthFailCount = 0; // consecutive health check failures (prevents false disconnect flash)
 let bgPort = null; // Port to background service worker (keep-alive only)
 
@@ -784,7 +785,9 @@ function applyInputState() {
   const enabled = serverConnected && !generating;
   dom.chatInput.disabled = !enabled;
   dom.btnSend.disabled = !enabled;
-  dom.btnScanTab.disabled = !enabled;
+  // The Scan/Update button is additionally locked while a context refresh is
+  // in flight, so a second click can't stack another update-context request.
+  dom.btnScanTab.disabled = !enabled || contextUpdating;
 }
 
 // Show/hide the stop button to reflect whether a response is streaming,
@@ -1941,29 +1944,56 @@ async function refreshScanButtonState() {
  * @param {string|null} label   Human label for single-doc updates (tab bar).
  */
 async function updateContext(fileId, label) {
-  const qs = fileId ? `?file_id=${encodeURIComponent(fileId)}` : "";
-  let res;
-  try {
-    res = await fetch(`${SERVER_URL}/chat/update-context${qs}`, { method: "POST" });
-  } catch (err) {
-    addMessage("system", `❌ Couldn't update context: ${err.message}`);
-    return;
-  }
-  const data = res.ok ? await res.json().catch(() => ({})) : {};
-  const updated = data.updated || [];
-  const unchanged = data.unchanged || [];
-  const failed = data.failed || [];
-  const prefix = label ? `${label}: ` : "";
-  const parts = [];
-  if (updated.length) parts.push(`✅ ${prefix}refreshed ${updated.length} (${updated.map(u => u.name).join(", ")})`);
-  if (unchanged.length) parts.push(`ℹ️ ${unchanged.length} unchanged — cache kept`);
-  if (failed.length) parts.push(`⚠️ ${failed.length} failed (${failed.map(f => f.name).join(", ")})`);
-  if (!parts.length) parts.push("No kept documents to update");
-  addMessage("system", parts.join(" · "));
+  // Guard against re-entrancy. The button is disabled below, but a queued
+  // second click must not stack another request — hammering Update with no
+  // visible feedback was crashing the panel.
+  if (contextUpdating) return;
+  contextUpdating = true;
 
-  updateContextUsage();
-  if (!dom.infoPanel.classList.contains("hidden")) loadInfoPanel();
-  refreshScanButtonState();
+  const qs = fileId ? `?file_id=${encodeURIComponent(fileId)}` : "";
+  const prefix = label ? `${label}: ` : "";
+
+  // Lock the button (label stays "🔄 Update", consistent with Scan) and show
+  // in-chat progress so the refresh is visible and can't be re-triggered
+  // mid-flight.
+  dom.btnScanTab.disabled = true;
+  const progressBubble = addMessage("system", "", true);
+  progressBubble.innerHTML = '<div class="update-indicator">🔄 Updating context…</div>';
+  scrollToBottom();
+
+  let message = "";
+  try {
+    let res;
+    try {
+      res = await fetch(`${SERVER_URL}/chat/update-context${qs}`, { method: "POST" });
+    } catch (err) {
+      message = `❌ Couldn't update context: ${err.message}`;
+      return;
+    }
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: res.statusText }));
+      message = `❌ Couldn't update context: ${err.detail || res.status}`;
+      return;
+    }
+    const data = await res.json().catch(() => ({}));
+    const updated = data.updated || [];
+    const unchanged = data.unchanged || [];
+    const failed = data.failed || [];
+    const parts = [];
+    if (updated.length) parts.push(`✅ ${prefix}refreshed ${updated.length} (${updated.map(u => u.name).join(", ")})`);
+    if (unchanged.length) parts.push(`ℹ️ ${unchanged.length} unchanged — cache kept`);
+    if (failed.length) parts.push(`⚠️ ${failed.length} failed (${failed.map(f => f.name).join(", ")})`);
+    if (!parts.length) parts.push("No kept documents to update");
+    message = parts.join(" · ");
+  } finally {
+    contextUpdating = false;
+    progressBubble.remove();
+    addMessage("system", message);
+    updateContextUsage();
+    if (!dom.infoPanel.classList.contains("hidden")) loadInfoPanel();
+    refreshScanButtonState();
+    applyInputState();
+  }
 }
 
 /**
@@ -2004,8 +2034,8 @@ function initTabBar() {
     if (!viewingFile || !viewingFile.id) return;
     if (dom.btnScanTab.dataset.kept === "true") {
       // Already in context — refresh its content from Drive (cache-aware).
+      // updateContext restores the button label/state itself on every path.
       await updateContext(viewingFile.id, viewingFile.name);
-      refreshScanButtonState();
       return;
     }
     dom.chatInput.value = `scan and keep ${viewingFile.name} in context`;

@@ -835,6 +835,20 @@ body {
   animation: fadeInPulse 1.6s ease-in-out infinite;
 }
 
+/* "Updating…" marker shown in the chat while the Update button re-fetches
+   kept documents from Drive. Mirrors the Thinking… indicator so the refresh
+   is visible instead of looking like a frozen UI. */
+.update-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-style: italic;
+  animation: fadeInPulse 1.6s ease-in-out infinite;
+}
+
 /* Remove old typing indicator (no longer used) */
 #typing-indicator { display: none; }
 
