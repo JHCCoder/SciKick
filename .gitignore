@@ -30,12 +30,10 @@ Thumbs.db
 *.swo
 
 # Claude Code
-# settings.local.json stays ignored (personal); the shared hook, skill, and
-# settings.json are tracked so the "update models" workflow syncs via git.
+# The whole .claude/ directory is local-only dev tooling (hooks, skills,
+# settings). It is intentionally NOT committed — SciKick is published from this
+# machine alone, so nothing here needs to sync via git.
 .claude/*
-!.claude/settings.json
-!.claude/hooks/
-!.claude/skills/
 
 # Logs
 code_log.txt
