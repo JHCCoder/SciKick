@@ -2287,7 +2287,7 @@ def _build_user_message(
 _PROVIDER_MODELS: dict[str, str] = {
     "anthropic":  "claude-opus-5, claude-sonnet-5, claude-haiku-4-5, claude-fable-5",
     "deepseek":   "deepseek-v4-pro, deepseek-v4-flash",
-    "glm":        "glm-5, glm-5.1, glm-4.7, glm-4.6, glm-4-long, glm-4.5-air",
+    "glm":        "glm-5.2, glm-5, glm-5.1, glm-4.7, glm-4.6, glm-4-long, glm-4.5-air",
     "openai":     "gpt-5, gpt-5.1, gpt-5.2, gpt-5.3, gpt-4.1, gpt-4o",
     "gemini":     "gemini-3.5-flash, gemini-3-pro, gemini-3.1-pro, gemini-2.5-flash, gemini-2.5-pro",
     "kimi":       "kimi-k3, kimi-k2.7-code, kimi-k2.6, kimi-k2.5",
@@ -2408,7 +2408,7 @@ _MODEL_THINKING_FAMILY: dict[str, str] = {
     "qwen3-max": "qwen", "qwen3.5-plus": "qwen", "qwen3.5-flash": "qwen",
     "qwen-plus": "qwen", "qwen-flash": "qwen",
     # glm — glm-4-long is never-off, excluded
-    "glm-5": "glm", "glm-5.1": "glm", "glm-4.7": "glm", "glm-4.6": "glm",
+    "glm-5.2": "glm", "glm-5": "glm", "glm-5.1": "glm", "glm-4.7": "glm", "glm-4.6": "glm",
     "glm-4.5-air": "glm",
     # kimi — k3/k2.7-code can't toggle, excluded
     "kimi-k2.5": "kimi", "kimi-k2.6": "kimi",
@@ -3323,7 +3323,8 @@ MODEL_CONTEXT_WINDOWS = {
     # deepseek — v4 family: 1M
     "deepseek-v4-pro": 1048576,
     "deepseek-v4-flash": 1048576,
-    # glm — GLM-5/5.1/4.7/4.6: 200K; 4-Long: 1M; 4.5-Air: 128K
+    # glm — GLM-5.2: 1M; GLM-5/5.1/4.7/4.6: 200K; 4-Long: 1M; 4.5-Air: 128K
+    "glm-5.2": 1048576,
     "glm-5": 200000,
     "glm-5.1": 200000,
     "glm-4.7": 200000,
