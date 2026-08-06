@@ -443,7 +443,16 @@ function handleProviderChange(prefill = true) {
   const visibleModel = dom.cfgModel.classList.contains("hidden")
     ? dom.cfgModelText.value : dom.cfgModel.value;
   const modelValue = (visibleModel || "").trim();
-  if (modelOptions.length) {
+  if (!provider) {
+    // No provider chosen yet — lock the model field until one is picked.
+    dom.cfgModel.disabled = true;
+    dom.cfgModel.innerHTML =
+      '<option value="" disabled selected>Choose a provider first</option>';
+    dom.cfgModel.value = "";
+    dom.cfgModel.classList.remove("hidden");
+    dom.cfgModelText.classList.add("hidden");
+  } else if (modelOptions.length) {
+    dom.cfgModel.disabled = false;
     dom.cfgModel.innerHTML = modelOptions
       .map((m) => `<option value="${m}">${m}</option>`)
       .join("");
@@ -453,6 +462,7 @@ function handleProviderChange(prefill = true) {
     dom.cfgModel.classList.remove("hidden");
     dom.cfgModelText.classList.add("hidden");
   } else {
+    dom.cfgModel.disabled = false;
     // Custom / local — preserve whatever was typed so nothing is lost.
     dom.cfgModelText.value = modelValue;
     dom.cfgModelText.placeholder = isLocal
