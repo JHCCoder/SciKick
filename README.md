@@ -36,6 +36,8 @@ Whether you're preparing a new manuscript or responding to peer review, SciKick 
 - **Import web articles** — scrape a journal article from any website with one click and analyze it next to your project files
 - **Google Drive integration** — load papers, figures, and documents directly from Drive
 - **Cross-computer resume** — project memory saved to your Drive folder; pick up where you left off from any machine
+- **Smart thinking toggle** — DeepSeek v4 and other thinking-capable models (Qwen, GLM, Kimi, GPT-5.x, MiniMax, Grok) give you an Auto / On / Off control in the chat bar: leave it on Auto and let the model decide when deep reasoning helps, force it on for hard analytical questions, or turn it off for fast, low-latency replies
+- **Provider-keyed model dropdown** — pick your provider first, then choose from a curated dropdown of that provider's models in ⚙ Settings (with a free-text override for custom or local runtimes)
 - **Cloud or local LLMs** — use a hosted provider (Claude, GPT, Gemini, DeepSeek, GLM, Kimi, Grok, MiniMax, Qwen), any OpenAI-compatible endpoint, or run a model on your own machine via Ollama, LM Studio, or MLX — fully private, no API key needed for local
 - **Streaming responses** — real-time AI chat with streaming
 - **Dark and light themes**
