@@ -268,7 +268,8 @@ async function showProviderInfo() {
       const data = await res.json();
       if (data.current && data.current.configured) {
         showProviderHint(
-          data.current.provider, data.current.model, data.current.thinking_mode
+          data.current.provider, data.current.model, data.current.thinking_mode,
+          data.current.thinking_capable
         );
       } else {
         // No LLM configured yet — nudge the user to ⚙ Settings instead of
@@ -313,20 +314,23 @@ function renderPdfCapStatus() {
   dom.pdfCapStatus.classList.toggle("pdf-cap-missing", !pdfCaps.auto);
 }
 
-function showProviderHint(provider, model, thinking) {
+function showProviderHint(provider, model, thinking, capable) {
   currentProvider = provider;
   currentModel = model;
   if (thinking) thinkingMode = thinking;
   // Show just the connected model — the provider label (esp. "Others")
   // isn't useful in the status bar; the model name is what matters. The
-  // Auto/On/Off chain-of-thought toggle rides along in the same bar.
+  // Auto/On/Off chain-of-thought toggle rides along in the same bar, but
+  // only for models that can actually toggle thinking (reasoning families).
+  const toggle = capable
+    ? `<span class="ctx-thinking">` +
+        `<button class="tk-opt${thinkingMode === "auto" ? " active" : ""}" data-mode="auto" title="Auto — think for substantive questions, skip trivial ones">Auto</button>` +
+        `<button class="tk-opt${thinkingMode === "on" ? " active" : ""}" data-mode="on" title="Always think (chain-of-thought)">On</button>` +
+        `<button class="tk-opt${thinkingMode === "off" ? " active" : ""}" data-mode="off" title="Never think — fastest replies">Off</button>` +
+      `</span>`
+    : "";
   dom.contextHint.innerHTML =
-    `<span class="ctx-model">🧠 <strong>${escHtml(model)}</strong></span>` +
-    `<span class="ctx-thinking">` +
-      `<button class="tk-opt${thinkingMode === "auto" ? " active" : ""}" data-mode="auto" title="Auto — think for substantive questions, skip trivial ones">Auto</button>` +
-      `<button class="tk-opt${thinkingMode === "on" ? " active" : ""}" data-mode="on" title="Always think (chain-of-thought)">On</button>` +
-      `<button class="tk-opt${thinkingMode === "off" ? " active" : ""}" data-mode="off" title="Never think — fastest replies">Off</button>` +
-    `</span>`;
+    `<span class="ctx-model">🧠 <strong>${escHtml(model)}</strong></span>` + toggle;
   dom.contextHint.classList.remove("hidden", "config-nudge");
   dom.contextHint.onclick = null;
 }
@@ -457,7 +461,8 @@ async function saveSettings() {
       // Update the context hint (clears the config nudge if it was shown)
       if (data.current) {
         showProviderHint(
-          data.current.provider, data.current.model, data.current.thinking_mode
+          data.current.provider, data.current.model, data.current.thinking_mode,
+          data.current.thinking_capable
         );
       }
       // Clear the API key field for security

@@ -932,7 +932,7 @@ _FACTUAL_STEMS = (
 
 def _wants_thinking(message: str, session_focus: Optional[str],
                     thinking_mode: str) -> bool:
-    """Decide whether a request should run DeepSeek v4 chain-of-thought.
+    """Decide whether a request should run chain-of-thought (reasoning models).
 
     ``thinking_mode`` is the user's three-way toggle: "on" always thinks,
     "off" never does. "auto" (Balanced) skips thinking for trivial/short-
@@ -2395,6 +2395,131 @@ _PROVIDER_EXTRA_HEADERS: dict[str, dict[str, str]] = {
     "qwen": {"x-dashscope-session-cache": "enable"},
 }
 
+# Thinking-mode toggle: exact model ID -> param family. "on" = omit the param
+# (all these families default to thinking on); the family entry in
+# _THINKING_PARAMS stores the "off"/disable shape + a larger output budget
+# where chain-of-thought needs room. Models not listed here can't toggle
+# thinking (always-on / never-off) — the Auto/On/Off UI hides for them.
+# Kept in sync by the update-models skill alongside _PROVIDER_MODELS.
+_MODEL_THINKING_FAMILY: dict[str, str] = {
+    # deepseek (v4 defaults to thinking on)
+    "deepseek-v4-pro": "deepseek", "deepseek-v4-flash": "deepseek",
+    # qwen — all 5 toggle via enable_thinking
+    "qwen3-max": "qwen", "qwen3.5-plus": "qwen", "qwen3.5-flash": "qwen",
+    "qwen-plus": "qwen", "qwen-flash": "qwen",
+    # glm — glm-4-long is never-off, excluded
+    "glm-5": "glm", "glm-5.1": "glm", "glm-4.7": "glm", "glm-4.6": "glm",
+    "glm-4.5-air": "glm",
+    # kimi — k3/k2.7-code can't toggle, excluded
+    "kimi-k2.5": "kimi", "kimi-k2.6": "kimi",
+    # openai — gpt-5 (minimal only) and gpt-4.x excluded; gpt-5.3 pending verify
+    "gpt-5.1": "openai", "gpt-5.2": "openai",
+    # minimax — only M3; M2.x always think
+    "MiniMax-M3": "minimax",
+    # grok — only 4.3; 4.5 always-on, 4.20/4.1-fast are separate model IDs
+    "grok-4.3": "grok",
+    # NOTE: Gemini (2.5-flash etc.) is deliberately NOT here — its OpenAI-
+    # compatible endpoint REJECTS the thinkingBudget field ("Unknown name
+    # thinkingBudget"), so we can't toggle its thinking per-request. It keeps
+    # its native always-on behavior; the Auto/On/Off buttons hide for it.
+}
+
+# Family -> how to DISABLE thinking (on = omit param -> natural default) and,
+# where chain-of-thought consumes the output budget, a larger max_tokens.
+_THINKING_PARAMS: dict[str, dict] = {
+    "deepseek": {"off": {"thinking": {"type": "disabled"}}, "max_tokens": 32768},
+    "qwen":     {"off": {"enable_thinking": False}},
+    "glm":      {"off": {"thinking": {"type": "disabled"}}, "max_tokens": 32768},
+    "kimi":     {"off": {"thinking": {"type": "disabled"}}, "max_tokens": 32768},
+    "openai":   {"off": {"reasoning_effort": "none"}},
+    # MiniMax-M3's on-mode is "adaptive", NOT "enabled" (sending enabled 400s) —
+    # omit-on sidesteps that entirely.
+    "minimax":  {"off": {"thinking": {"type": "disabled"}}},
+    "grok":     {"off": {"reasoning_effort": "none"}},
+}
+
+
+def _thinking_capable(model: str) -> bool:
+    """Whether the given model supports the Auto/On/Off chain-of-thought toggle."""
+    return model in _MODEL_THINKING_FAMILY
+
+
+# Providers whose reasoning models emit chain-of-thought as literal
+# <think>...</think> text in the content stream (MiniMax M3) instead of
+# streaming it as reasoning_content. The block is stripped so the panel shows
+# only the final answer. Extend as live smoke tests reveal more.
+_THINK_TAG_PROVIDERS = {"minimax"}
+
+
+class _ThinkStripper:
+    """Drop <think>...</think> blocks from streamed text across chunk boundaries.
+
+    MiniMax M3 wraps its chain-of-thought in literal <think> tags in
+    delta.content (it has no reasoning_content), and a block can span many
+    streamed chunks. We buffer while inside a block and only emit text outside
+    it. An unclosed block (the model ran out mid-thought) is dropped at the end.
+    """
+
+    _OPEN = "<think>"
+    _CLOSE = "</think>"
+    # Every proper prefix of _OPEN — if the buffer ends with one, the tag may
+    # be split mid-word across chunks, so hold the tail back until we know.
+    # (Literal string here: a class-body generator expression can't see the
+    # class attribute `_OPEN`.)
+    _PREFIXES = tuple("<think"[:i] for i in range(1, len("<think")))
+
+    def __init__(self):
+        self._buf = ""
+        self._in_think = False
+
+    def process(self, chunk: str) -> tuple[list[str], bool]:
+        """Feed one content chunk; return (text to emit, newly_entered_think)."""
+        self._buf += chunk
+        out: list[str] = []
+        entered = False
+        while True:
+            if self._in_think:
+                end = self._buf.find(self._CLOSE)
+                if end == -1:
+                    break  # still inside the block — keep buffering
+                self._buf = self._buf[end + len(self._CLOSE):]
+                self._in_think = False
+                continue
+            start = self._buf.lower().find(self._OPEN)
+            if start != -1:
+                if start:
+                    out.append(self._buf[:start])
+                self._buf = self._buf[start + len(self._OPEN):]
+                self._in_think = True
+                entered = True
+                continue
+            # No complete open tag. If the buffer ends with a partial tag
+            # prefix, hold the tail back; otherwise emit all of it.
+            lower = self._buf.lower()
+            held = 0
+            for pref in self._PREFIXES:
+                if lower.endswith(pref):
+                    held = max(held, len(pref))
+            if held:
+                emit, self._buf = self._buf[:-held], self._buf[-held:]
+            else:
+                emit, self._buf = self._buf, ""
+            if emit:
+                out.append(emit)
+            break
+        return out, entered
+
+    def flush(self) -> str:
+        """Remaining buffer at stream end — an unclosed think block is dropped."""
+        tail = self._buf
+        self._buf = ""
+        return "" if self._in_think else tail
+
+
+def _strip_think_tags(text: str) -> str:
+    """Remove <think>...</think> blocks from a complete (non-streamed) reply."""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+
 
 def _cache_counts_from_usage(usage, provider: str) -> tuple[int, int]:
     """Extract (cache_hit_tokens, cache_miss_tokens) from a provider usage obj.
@@ -2521,10 +2646,12 @@ async def _stream_openai_compatible(
 ) -> AsyncGenerator[str, None]:
     """Stream using the OpenAI-compatible SDK (DeepSeek, OpenAI, Groq, etc.).
 
-    ``thinking`` only affects DeepSeek v4 models, which default to thinking
-    mode ON: chain-of-thought streams in delta.reasoning_content while
-    delta.content stays empty until the model finishes reasoning. Passing
-    ``thinking=False`` disables it for fast answers to simple questions.
+    ``thinking`` affects the models in ``_MODEL_THINKING_FAMILY`` (reasoning
+    models that default to thinking mode ON): chain-of-thought streams in
+    delta.reasoning_content while delta.content stays empty until the model
+    finishes reasoning. Passing ``thinking=False`` disables it for fast
+    answers to simple questions via the family's "off" param. Models not in
+    the family map ignore ``thinking`` entirely.
     """
     from openai import AsyncOpenAI
 
@@ -2535,8 +2662,12 @@ async def _stream_openai_compatible(
     # reply. Give thinking + answer room, and stream a "thinking" marker so
     # the panel shows progress. With thinking disabled the plain 8192 budget
     # is plenty (no CoT consuming it).
-    thinking_model = model.startswith("deepseek-v4")
-    max_tokens = 32768 if (thinking_model and thinking) else 8192
+    family = _MODEL_THINKING_FAMILY.get(model)
+    params = _THINKING_PARAMS.get(family) if family else None
+    max_tokens = params.get("max_tokens", 8192) if (params and thinking) else 8192
+    # MiniMax-M3 streams its chain-of-thought as literal <think> tags in
+    # content (no reasoning_content) — strip them so only the answer shows.
+    stripper = _ThinkStripper() if provider in _THINK_TAG_PROVIDERS else None
 
     try:
         # Providers with prefix caching stream a final usage chunk (empty
@@ -2549,10 +2680,11 @@ async def _stream_openai_compatible(
         headers = _PROVIDER_EXTRA_HEADERS.get(provider)
         if headers:
             stream_kwargs["extra_headers"] = headers
-        if thinking_model:
-            stream_kwargs["extra_body"] = {
-                "thinking": {"type": "enabled" if thinking else "disabled"}
-            }
+        # "on"/auto-think = omit the param (these families default to thinking
+        # on); "off" sends the family's disable shape. Models not in the family
+        # map get no thinking param at all.
+        if params and not thinking:
+            stream_kwargs["extra_body"] = params["off"]
         stream = await client.chat.completions.create(
             model=model,
             messages=[
@@ -2575,14 +2707,30 @@ async def _stream_openai_compatible(
             if not delta:
                 continue
             if delta.content:
-                yielded_text = True
-                yield f"data: {json.dumps({'type': 'text', 'content': delta.content})}\n\n"
+                if stripper is None:
+                    yielded_text = True
+                    yield f"data: {json.dumps({'type': 'text', 'content': delta.content})}\n\n"
+                else:
+                    pieces, entered = stripper.process(delta.content)
+                    if entered and not yielded_thinking:
+                        yielded_thinking = True
+                        yield f"data: {json.dumps({'type': 'thinking', 'content': ''})}\n\n"
+                    for piece in pieces:
+                        if piece:
+                            yielded_text = True
+                            yield f"data: {json.dumps({'type': 'text', 'content': piece})}\n\n"
             elif not yielded_text and getattr(delta, "reasoning_content", None):
                 # Reasoning model mid-thought — emit a one-shot progress marker
                 # so the panel isn't dead air during a long chain-of-thought.
                 if not yielded_thinking:
                     yielded_thinking = True
                     yield f"data: {json.dumps({'type': 'thinking', 'content': ''})}\n\n"
+
+        if stripper is not None:
+            leftover = stripper.flush()
+            if leftover:
+                yielded_text = True
+                yield f"data: {json.dumps({'type': 'text', 'content': leftover})}\n\n"
 
         if not yielded_text:
             # Model consumed its output budget reasoning and returned no text —
@@ -2645,24 +2793,27 @@ async def _sync_openai_compatible(
 ) -> str:
     """Non-streaming call via OpenAI-compatible SDK.
 
-    ``thinking`` only affects DeepSeek v4 models (see
+    ``thinking`` affects the models in ``_MODEL_THINKING_FAMILY`` (see
     ``_stream_openai_compatible`` for the reasoning-budget context).
     """
     from openai import AsyncOpenAI
 
     client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-    # DeepSeek v4 defaults to thinking mode — reasoning consumes output tokens
-    # before any visible content, so give it a much larger budget than the
-    # generic 8192 (see _stream_openai_compatible for the full context). With
-    # thinking disabled the plain 8192 budget is plenty (no CoT consuming it).
-    thinking_model = model.startswith("deepseek-v4")
-    max_tokens = 32768 if (thinking_model and thinking) else 8192
+    # Reasoning models default to thinking mode — reasoning consumes output
+    # tokens before any visible content, so give them a much larger budget
+    # than the generic 8192 (see _stream_openai_compatible for the full
+    # context). With thinking disabled the plain 8192 budget is plenty (no CoT
+    # consuming it).
+    family = _MODEL_THINKING_FAMILY.get(model)
+    params = _THINKING_PARAMS.get(family) if family else None
+    max_tokens = params.get("max_tokens", 8192) if (params and thinking) else 8192
     headers = _PROVIDER_EXTRA_HEADERS.get(provider)
     create_kwargs = {"extra_headers": headers} if headers else {}
-    if thinking_model:
-        create_kwargs["extra_body"] = {
-            "thinking": {"type": "enabled" if thinking else "disabled"}
-        }
+    # "on"/auto-think = omit the param (these families default to thinking on);
+    # "off" sends the family's disable shape. Models not in the family map get
+    # no thinking param at all.
+    if params and not thinking:
+        create_kwargs["extra_body"] = params["off"]
     response = await client.chat.completions.create(
         model=model,
         messages=[
@@ -2674,7 +2825,12 @@ async def _sync_openai_compatible(
         **create_kwargs,
     )
     _record_cache_usage(model, getattr(response, "usage", None), provider)
-    return response.choices[0].message.content or ""
+    content = response.choices[0].message.content or ""
+    # MiniMax-M3 wraps its chain-of-thought in literal <think> tags — strip
+    # them so the non-streamed reply shows only the answer.
+    if provider in _THINK_TAG_PROVIDERS:
+        content = _strip_think_tags(content)
+    return content
 
 
 # ---------------------------------------------------------------------------
@@ -3035,6 +3191,7 @@ async def configure_llm(req: ConfigureRequest):
             "provider": current["provider"],
             "model": current["model"],
             "thinking_mode": current.get("thinking_mode", "auto"),
+            "thinking_capable": _thinking_capable(current["model"]),
             "configured": True,
         },
     }
@@ -3118,6 +3275,7 @@ async def list_providers():
             "provider": current["provider"] if current else "unknown",
             "model": current["model"] if current else "unknown",
             "thinking_mode": current.get("thinking_mode", "auto") if current else "auto",
+            "thinking_capable": _thinking_capable(current["model"]) if current else False,
             "configured": current is not None,
         } if current else None,
         "available": [
