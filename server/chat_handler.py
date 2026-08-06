@@ -2438,6 +2438,23 @@ _THINKING_PARAMS: dict[str, dict] = {
     "grok":     {"off": {"reasoning_effort": "none"}},
 }
 
+# Providers whose OpenAI-compatible API rejects the default 0.7 sampling
+# temperature. A plain float applies to both thinking states; a
+# {thinking: temp} dict lets a model require different temperatures per
+# thinking mode — kimi-k2.x needs 1.0 while thinking, 0.6 with it disabled.
+# Keyed by provider id; absent → 0.7. Kept in sync by update-models.
+_TEMPERATURE_DEFAULTS: dict[str, float | dict[bool, float]] = {
+    "kimi": {True: 1.0, False: 0.6},
+}
+
+
+def _sampling_temperature(provider: str, thinking: bool) -> float:
+    """Return the sampling temperature for a provider + thinking state."""
+    t = _TEMPERATURE_DEFAULTS.get(provider)
+    if isinstance(t, dict):
+        return t.get(thinking, 0.7)
+    return t if t is not None else 0.7
+
 
 def _thinking_capable(model: str) -> bool:
     """Whether the given model supports the Auto/On/Off chain-of-thought toggle."""
@@ -2691,7 +2708,7 @@ async def _stream_openai_compatible(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": message},
             ],
-            temperature=0.7,
+            temperature=_sampling_temperature(provider, thinking),
             max_tokens=max_tokens,
             stream=True,
             **stream_kwargs,
@@ -2820,7 +2837,7 @@ async def _sync_openai_compatible(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": message},
         ],
-        temperature=0.7,
+        temperature=_sampling_temperature(provider, thinking),
         max_tokens=max_tokens,
         **create_kwargs,
     )

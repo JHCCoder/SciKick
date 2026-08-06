@@ -49,7 +49,7 @@ GOOGLE_SCOPES = [
 #   glm        → uses OpenAI-compatible SDK, base_url = https://open.bigmodel.cn/api/paas/v4
 #   openai     → uses OpenAI SDK, base_url = https://api.openai.com/v1
 #   gemini     → uses OpenAI-compatible SDK, base_url = https://generativelanguage.googleapis.com/v1beta/openai
-#   kimi       → uses OpenAI-compatible SDK, base_url = https://api.moonshot.cn/v1
+#   kimi       → uses OpenAI-compatible SDK, base_url = https://api.moonshot.ai/v1 (intl; .cn is the China-only platform)
 #   grok       → uses OpenAI-compatible SDK, base_url = https://api.x.ai/v1
 #   minimax    → uses OpenAI-compatible SDK, base_url = https://api.minimax.io/v1
 #   qwen       → uses OpenAI-compatible SDK, base_url = https://dashscope.aliyuncs.com/compatible-mode/v1
@@ -98,7 +98,7 @@ PROVIDER_DEFAULTS = {
     },
     "kimi": {
         "model": "kimi-k2.5",
-        "base_url": "https://api.moonshot.cn/v1",
+        "base_url": "https://api.moonshot.ai/v1",
     },
     "grok": {
         "model": "grok-4.5",
