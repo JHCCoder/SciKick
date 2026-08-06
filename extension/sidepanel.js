@@ -36,7 +36,7 @@ let sessionFocus = null; // "brainstorming" | "paper_discussion" | "paper_writin
 let currentStream = null; // AbortController for SSE
 let loadingInProgress = false; // true during loadProject / scrape — suppress disconnect banner
 let generating = false; // true while an LLM response is streaming — locks input + scan (ChatGPT-style)
-let contextUpdating = false; // true while the Update button's Drive refresh is in flight — locks the Scan/Update button
+let contextUpdating = false; // true while a blocking context operation (Update / Scrape / Load project) is in flight — locks chat + context controls
 let healthFailCount = 0; // consecutive health check failures (prevents false disconnect flash)
 let bgPort = null; // Port to background service worker (keep-alive only)
 
@@ -527,7 +527,11 @@ async function loadProject() {
     return;
   }
 
-  dom.btnLoad.disabled = true;
+  // Lock the chat + context controls and swap send → ✕ while the folder is
+  // downloaded, so a message can't race the load and ✕ can cancel it.
+  if (currentStream) currentStream.abort();
+  currentStream = new AbortController();
+  setUpdating(true);
   dom.btnLoad.textContent = "Loading...";
   loadingInProgress = true;
 
@@ -535,7 +539,7 @@ async function loadProject() {
     // Use the resume endpoint — it loads files AND restores memory in one call
     showSystemMessage("🔄 Loading project from Google Drive...");
 
-    const resumeRes = await fetch(`${SERVER_URL}/drive/folder/${folderId}/resume`);
+    const resumeRes = await fetch(`${SERVER_URL}/drive/folder/${folderId}/resume`, { signal: currentStream.signal });
     if (!resumeRes.ok) {
       const err = await resumeRes.json().catch(() => ({}));
       if (resumeRes.status === 401) {
@@ -588,6 +592,7 @@ async function loadProject() {
           folder_id: folderId,
           folder_name: folder_name,
         }),
+        signal: currentStream.signal,
       });
     }
 
@@ -601,6 +606,7 @@ async function loadProject() {
     try {
       const loadRes = await fetch(`${SERVER_URL}/drive/folder/${folderId}/load-context`, {
         method: "POST",
+        signal: currentStream.signal,
       });
       if (loadRes.ok) {
         loadData = await loadRes.json();
@@ -657,8 +663,12 @@ async function loadProject() {
         showSystemMessage(`⚠️ Couldn't examine that folder: ${err.detail}`);
       }
     } catch (e) {
+      if (e.name === "AbortError") throw e; // cancelled — let the outer handler finish
       showSystemMessage(`⚠️ Context loading warning: ${e.message}`);
     }
+
+    // User hit ✕ mid-load — skip the success steps below.
+    if (currentStream.signal.aborted) throw new DOMException("aborted", "AbortError");
 
     // Best-effort context verification — used only to set the project-name
     // header. The folder breakdown, summary, and manuscript details are
@@ -703,10 +713,15 @@ async function loadProject() {
     if (!dom.infoPanel.classList.contains("hidden")) loadInfoPanel();
 
   } catch (e) {
-    showSystemMessage(`❌ **Error loading project:** ${e.message}`);
+    if (e.name === "AbortError") {
+      showSystemMessage("⏹️ Load cancelled.");
+    } else {
+      showSystemMessage(`❌ **Error loading project:** ${e.message}`);
+    }
   } finally {
+    currentStream = null;
+    setUpdating(false); // restores send + input + context controls
     loadingInProgress = false;
-    dom.btnLoad.disabled = false;
     dom.btnLoad.textContent = "Load Project";
   }
 }
@@ -782,12 +797,14 @@ function setChatInput(text) {
 // mirrors ChatGPT, where you can't queue another message mid-generation.
 // Centralized so the 5s health poll can't re-enable input mid-stream.
 function applyInputState() {
-  const enabled = serverConnected && !generating;
+  const enabled = serverConnected && !generating && !contextUpdating;
   dom.chatInput.disabled = !enabled;
   dom.btnSend.disabled = !enabled;
-  // The Scan/Update button is additionally locked while a context refresh is
-  // in flight, so a second click can't stack another update-context request.
-  dom.btnScanTab.disabled = !enabled || contextUpdating;
+  // Every context-mutating action locks whenever the chat is (server down,
+  // streaming, or a context operation in flight) so two can't race.
+  dom.btnScanTab.disabled = !enabled;
+  dom.btnUseTab.disabled = !enabled;
+  dom.btnLoad.disabled = !enabled;
 }
 
 // Show/hide the stop button to reflect whether a response is streaming,
@@ -799,8 +816,19 @@ function setGenerating(isGenerating) {
   applyInputState();
 }
 
+// Mirror of setGenerating for any blocking context operation (Update,
+// Scrape, Load project): while the operation's fetch is in flight, send
+// swaps to ✕ (which aborts it) and the chat + context controls stay
+// locked, so a message can't race the operation.
+function setUpdating(isUpdating) {
+  contextUpdating = isUpdating;
+  dom.btnStop.classList.toggle("hidden", !isUpdating);
+  dom.btnSend.classList.toggle("hidden", isUpdating); // swap send ↔ stop
+  applyInputState();
+}
+
 async function sendMessage() {
-  if (generating) return; // a response is streaming — input is locked
+  if (generating || contextUpdating) return; // streaming or a context refresh is in flight
   const text = dom.chatInput.value.trim();
   if (!text) return;
 
@@ -1944,19 +1972,22 @@ async function refreshScanButtonState() {
  * @param {string|null} label   Human label for single-doc updates (tab bar).
  */
 async function updateContext(fileId, label) {
-  // Guard against re-entrancy. The button is disabled below, but a queued
-  // second click must not stack another request — hammering Update with no
-  // visible feedback was crashing the panel.
+  // Guard against re-entrancy. The chat + button are locked below, but a
+  // queued second click must not stack another request — hammering Update
+  // with no visible feedback was crashing the panel.
   if (contextUpdating) return;
-  contextUpdating = true;
 
   const qs = fileId ? `?file_id=${encodeURIComponent(fileId)}` : "";
   const prefix = label ? `${label}: ` : "";
 
-  // Lock the button (label stays "🔄 Update", consistent with Scan) and show
-  // in-chat progress so the refresh is visible and can't be re-triggered
-  // mid-flight.
-  dom.btnScanTab.disabled = true;
+  // Lock the chat input + scan button and swap send → ✕ while the refresh
+  // runs, so a message can't race the update and the refresh can be stopped
+  // with the same interrupt that aborts generation. The ✕ handler aborts
+  // currentStream, which this fetch listens to.
+  if (currentStream) currentStream.abort();
+  currentStream = new AbortController();
+  setUpdating(true);
+
   const progressBubble = addMessage("system", "", true);
   progressBubble.innerHTML = '<div class="update-indicator">🔄 Updating context…</div>';
   scrollToBottom();
@@ -1965,9 +1996,15 @@ async function updateContext(fileId, label) {
   try {
     let res;
     try {
-      res = await fetch(`${SERVER_URL}/chat/update-context${qs}`, { method: "POST" });
+      res = await fetch(`${SERVER_URL}/chat/update-context${qs}`, {
+        method: "POST",
+        signal: currentStream.signal,
+      });
     } catch (err) {
-      message = `❌ Couldn't update context: ${err.message}`;
+      // User hit ✕ — the server may still finish the refresh; just stop waiting.
+      message = err.name === "AbortError"
+        ? "⏹️ Update cancelled."
+        : `❌ Couldn't update context: ${err.message}`;
       return;
     }
     if (!res.ok) {
@@ -1986,13 +2023,13 @@ async function updateContext(fileId, label) {
     if (!parts.length) parts.push("No kept documents to update");
     message = parts.join(" · ");
   } finally {
-    contextUpdating = false;
+    currentStream = null;
+    setUpdating(false); // restores send + input + scan button state
     progressBubble.remove();
     addMessage("system", message);
     updateContextUsage();
     if (!dom.infoPanel.classList.contains("hidden")) loadInfoPanel();
     refreshScanButtonState();
-    applyInputState();
   }
 }
 
@@ -2068,12 +2105,18 @@ function initTabBar() {
         return;
       }
 
-      dom.btnUseTab.disabled = true;
+      // Lock the chat + context controls and swap send → ✕ while scraping,
+      // so the scrape can be interrupted like an LLM response. The ✕ handler
+      // aborts currentStream, which the /chat/scrape fetch listens to.
+      if (currentStream) currentStream.abort();
+      currentStream = new AbortController();
+      setUpdating(true);
       dom.btnUseTab.textContent = "Scraping...";
       loadingInProgress = true;
-      showSystemMessage(`🔍 Scraping paper from ${new URL(scrapeUrl).hostname}...`);
 
       try {
+        showSystemMessage(`🔍 Scraping paper from ${new URL(scrapeUrl).hostname}...`);
+
         // Extract the page HTML from the active tab using the user's
         // authenticated browser session (avoids 403 on journal sites).
         // Host access for all sites is declared as a REQUIRED permission
@@ -2102,11 +2145,15 @@ function initTabBar() {
         if (!pageHtml || pageHtml.length < 500) {
           throw new Error("Page content is empty or too short — the page may not have finished loading.");
         }
+        // executeScript isn't abortable, so if ✕ was hit while it ran, bail
+        // out here before sending the scrape.
+        if (currentStream.signal.aborted) throw new DOMException("aborted", "AbortError");
 
         const res = await fetch(`${SERVER_URL}/chat/scrape`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ url: scrapeUrl, html: pageHtml }),
+          signal: currentStream.signal,
         });
 
         if (!res.ok) {
@@ -2132,10 +2179,15 @@ function initTabBar() {
         if (!dom.infoPanel.classList.contains("hidden")) loadInfoPanel();
 
       } catch (e) {
-        showSystemMessage(`❌ **Scrape failed:** ${e.message}\n\nTry loading the paper via Google Drive instead.`);
+        if (e.name === "AbortError") {
+          showSystemMessage("⏹️ Scrape cancelled.");
+        } else {
+          showSystemMessage(`❌ **Scrape failed:** ${e.message}\n\nTry loading the paper via Google Drive instead.`);
+        }
       } finally {
+        currentStream = null;
+        setUpdating(false); // restores send + input + context controls
         loadingInProgress = false;
-        dom.btnUseTab.disabled = false;
         // Scrape may have just added the page to context — refresh the label
         // (flips to "Unload page" on success, stays "Scrape this page" on error).
         refreshScrapeButtonState();
