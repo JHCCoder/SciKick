@@ -19,6 +19,18 @@ const LOCAL_DEFAULTS = {
   "local-mlx": "http://localhost:8080/v1",
 };
 
+// Split a provider's comma-separated model list from /chat/providers into an
+// array. Real model IDs never contain spaces, so drop parenthetical hints and
+// any descriptive phrase (e.g. local runtimes append "… (whatever you `ollama
+// pull`ed)" or "whatever model is loaded…"). `custom` has no fixed list and is
+// handled separately (free-text model entry).
+function parseModelList(models) {
+  return (models || "")
+    .split(",")
+    .map((s) => s.split("(")[0].trim()) // drop parenthetical hints
+    .filter((s) => s && !/\s/.test(s));  // a real model ID has no spaces
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -28,6 +40,7 @@ let everConnected = false; // has the panel ever reached the server? (drives fir
 let projectLoaded = false;
 let projectFiles = []; // {id, name, mimeType} — files in the loaded project
 let projectFolderId = null; // Drive folder ID of the loaded project
+let providerModels = {}; // provider id -> [model ids], from /chat/providers
 let viewingFile = null; // {name, id} — project file currently open in a browser tab
 let currentTabUrl = null; // URL of the currently active browser tab
 let currentDriveFolderId = null; // Drive folder id on the active tab, if loadable (else null)
@@ -80,7 +93,8 @@ const dom = {
   cfgProvider: $("#cfg-provider"),
   cfgApiKey: $("#cfg-api-key"),
   cfgApiKeyLabel: $("#cfg-api-key-label"),
-  cfgModel: $("#cfg-model"),
+  cfgModel: $("#cfg-model"), // native select — providers with a known model list
+  cfgModelText: $("#cfg-model-text"), // free-text — custom / local runtimes
   cfgBaseUrl: $("#cfg-base-url"),
   cfgBaseUrlLabel: $("#cfg-base-url-label"),
   cfgStatus: $("#cfg-status"),
@@ -387,9 +401,19 @@ async function openSettings() {
     const res = await fetch(`${SERVER_URL}/chat/providers`);
     if (res.ok) {
       const data = await res.json();
+      // Cache each provider's model list for the model dropdown. `custom` has
+      // no fixed list (model is free text); local runtimes depend on what the
+      // user has loaded, so their hint lists are offered as suggestions only.
+      providerModels = {};
+      for (const p of data.available || []) {
+        if (p.id === "custom") continue;
+        providerModels[p.id] = parseModelList(p.models);
+      }
       if (data.current) {
         dom.cfgProvider.value = data.current.provider || "anthropic";
-        dom.cfgModel.value = data.current.model || "";
+        const model = data.current.model || "";
+        dom.cfgModel.value = model;
+        dom.cfgModelText.value = model;
       }
     }
   } catch (e) {
@@ -410,6 +434,33 @@ function handleProviderChange(prefill = true) {
   const provider = dom.cfgProvider.value;
   const isLocal = Object.prototype.hasOwnProperty.call(LOCAL_DEFAULTS, provider);
   const showsBaseUrl = provider === "custom" || isLocal;
+
+  // Model — a native <select> when the provider has a known model list,
+  // swapping to a free-text input for providers whose model depends on the
+  // runtime (custom / local). Both share identical styling, so the swap is
+  // seamless and matches the provider dropdown above.
+  const modelOptions = providerModels[provider] || [];
+  const visibleModel = dom.cfgModel.classList.contains("hidden")
+    ? dom.cfgModelText.value : dom.cfgModel.value;
+  const modelValue = (visibleModel || "").trim();
+  if (modelOptions.length) {
+    dom.cfgModel.innerHTML = modelOptions
+      .map((m) => `<option value="${m}">${m}</option>`)
+      .join("");
+    // Keep the current model when it's in the list; otherwise default to the
+    // provider's first model so the field never shows a stale value.
+    dom.cfgModel.value = modelOptions.includes(modelValue) ? modelValue : modelOptions[0];
+    dom.cfgModel.classList.remove("hidden");
+    dom.cfgModelText.classList.add("hidden");
+  } else {
+    // Custom / local — preserve whatever was typed so nothing is lost.
+    dom.cfgModelText.value = modelValue;
+    dom.cfgModelText.placeholder = isLocal
+      ? "model name loaded in your runtime"
+      : "any model name your provider supports";
+    dom.cfgModel.classList.add("hidden");
+    dom.cfgModelText.classList.remove("hidden");
+  }
 
   // Base URL field — shown for custom + local runtimes.
   dom.cfgBaseUrl.classList.toggle("hidden", !showsBaseUrl);
@@ -432,7 +483,8 @@ function handleProviderChange(prefill = true) {
 async function saveSettings() {
   const provider = dom.cfgProvider.value;
   const apiKey = dom.cfgApiKey.value.trim();
-  const model = dom.cfgModel.value.trim();
+  const modelEl = dom.cfgModel.classList.contains("hidden") ? dom.cfgModelText : dom.cfgModel;
+  const model = modelEl.value.trim();
   const baseUrl = dom.cfgBaseUrl.value.trim();
 
   if (!provider) return;
