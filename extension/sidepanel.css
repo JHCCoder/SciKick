@@ -872,6 +872,10 @@ body {
 }
 
 #context-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   font-size: 11px;
   color: var(--text-secondary);
   margin-bottom: 6px;
@@ -885,6 +889,36 @@ body {
   cursor: pointer;
   color: var(--text-primary, inherit);
   border: 1px solid var(--accent, #facb01);
+}
+.ctx-model {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ctx-thinking {
+  display: inline-flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.tk-opt {
+  font-size: 10px;
+  line-height: 1.6;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.tk-opt:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.tk-opt.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
 }
 
 #input-row {

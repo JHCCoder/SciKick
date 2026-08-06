@@ -39,6 +39,9 @@ let generating = false; // true while an LLM response is streaming — locks inp
 let contextUpdating = false; // true while a blocking context operation (Update / Scrape / Load project) is in flight — locks chat + context controls
 let healthFailCount = 0; // consecutive health check failures (prevents false disconnect flash)
 let bgPort = null; // Port to background service worker (keep-alive only)
+let thinkingMode = "auto"; // "auto" | "on" | "off" — DeepSeek v4 chain-of-thought
+let currentProvider = null; // last known provider/model — sent with the thinking toggle
+let currentModel = null; //  so /chat/configure keeps the runtime overrides intact
 
 // ---------------------------------------------------------------------------
 // DOM Elements
@@ -264,7 +267,9 @@ async function showProviderInfo() {
     if (res.ok) {
       const data = await res.json();
       if (data.current && data.current.configured) {
-        showProviderHint(data.current.provider, data.current.model);
+        showProviderHint(
+          data.current.provider, data.current.model, data.current.thinking_mode
+        );
       } else {
         // No LLM configured yet — nudge the user to ⚙ Settings instead of
         // letting them discover it via a failed first chat.
@@ -308,12 +313,51 @@ function renderPdfCapStatus() {
   dom.pdfCapStatus.classList.toggle("pdf-cap-missing", !pdfCaps.auto);
 }
 
-function showProviderHint(provider, model) {
+function showProviderHint(provider, model, thinking) {
+  currentProvider = provider;
+  currentModel = model;
+  if (thinking) thinkingMode = thinking;
   // Show just the connected model — the provider label (esp. "Others")
-  // isn't useful in the status bar; the model name is what matters.
-  dom.contextHint.innerHTML = `🧠 <strong>${escHtml(model)}</strong>`;
+  // isn't useful in the status bar; the model name is what matters. The
+  // Auto/On/Off chain-of-thought toggle rides along in the same bar.
+  dom.contextHint.innerHTML =
+    `<span class="ctx-model">🧠 <strong>${escHtml(model)}</strong></span>` +
+    `<span class="ctx-thinking">` +
+      `<button class="tk-opt${thinkingMode === "auto" ? " active" : ""}" data-mode="auto" title="Auto — think for substantive questions, skip trivial ones">Auto</button>` +
+      `<button class="tk-opt${thinkingMode === "on" ? " active" : ""}" data-mode="on" title="Always think (chain-of-thought)">On</button>` +
+      `<button class="tk-opt${thinkingMode === "off" ? " active" : ""}" data-mode="off" title="Never think — fastest replies">Off</button>` +
+    `</span>`;
   dom.contextHint.classList.remove("hidden", "config-nudge");
   dom.contextHint.onclick = null;
+}
+
+function renderThinkingToggle() {
+  // Update the active segment after a toggle click (no full re-render needed).
+  document.querySelectorAll(".ctx-thinking .tk-opt").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.mode === thinkingMode);
+  });
+}
+
+async function setThinkingMode(mode) {
+  if (!["auto", "on", "off"].includes(mode) || mode === thinkingMode) return;
+  thinkingMode = mode;
+  renderThinkingToggle();
+  try {
+    // Send the current provider/model along so the server keeps its runtime
+    // overrides (it resets them on each /configure call).
+    await fetch(`${SERVER_URL}/chat/configure`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: currentProvider || undefined,
+        model: currentModel || undefined,
+        thinking_mode: mode,
+        persist: true,
+      }),
+    });
+  } catch (e) {
+    // Non-critical — the mode resets on the next provider-info refresh.
+  }
 }
 
 function showConfigNudge() {
@@ -412,7 +456,9 @@ async function saveSettings() {
       dom.cfgStatus.className = "";
       // Update the context hint (clears the config nudge if it was shown)
       if (data.current) {
-        showProviderHint(data.current.provider, data.current.model);
+        showProviderHint(
+          data.current.provider, data.current.model, data.current.thinking_mode
+        );
       }
       // Clear the API key field for security
       dom.cfgApiKey.value = "";
@@ -1405,6 +1451,12 @@ dom.cfgProvider.addEventListener("change", handleProviderChange);
 // Info panel
 dom.btnInfo.addEventListener("click", toggleInfoPanel);
 if (dom.btnInfoClose) dom.btnInfoClose.addEventListener("click", closeInfoPanel);
+// Thinking toggle is rebuilt inside #context-hint on every provider-hint
+// render — delegate the click so it works without re-binding each time.
+dom.contextHint.addEventListener("click", (e) => {
+  const btn = e.target.closest(".tk-opt");
+  if (btn) setThinkingMode(btn.dataset.mode);
+});
 
 async function toggleInfoPanel() {
   if (!dom.infoPanel.classList.contains("hidden")) {

@@ -893,6 +893,85 @@ def _has_any(text_lower: str, phrases: tuple[str, ...]) -> bool:
     return any(p in text_lower for p in phrases)
 
 
+# ---------------------------------------------------------------------------
+# DeepSeek v4 thinking-mode heuristic
+# ---------------------------------------------------------------------------
+
+# Exact-match phrases that never need chain-of-thought.
+_TRIVIAL_PHRASES = (
+    "hi", "hello", "hey", "yo", "thanks", "thank you", "ok", "okay",
+    "got it", "sounds good", "great", "perfect", "awesome", "cool",
+    "nice", "fine", "done", "yes", "no",
+)
+
+# Greeting / chit-chat markers — skip thinking when combined with a short
+# message (no substantive request attached).
+_GREETING_MARKERS = (
+    "hi", "hello", "hey", "yo", "good morning", "good afternoon",
+    "good evening", "how are you", "thanks", "thank you",
+)
+
+# Analytical markers — always think, even in short messages. Checked before
+# the short-factual skip so "why did the authors pick X?" keeps thinking.
+_ANALYSIS_MARKERS = (
+    "why", "explain", "analyze", "analyse", "compare", "contrast",
+    "draft", "write", "revise", "edit", "rewrite", "respond to",
+    "mechanism", "implications", "justify", "evaluate", "critique",
+    "summarize", "summarise", "how does", "how do", "what causes",
+    "what happens", "interpret", "synthesize", "synthesise", "argue",
+    "hypothesis",
+)
+
+# Factual stems for short lookups ("what's the title?", "when published?").
+_FACTUAL_STEMS = (
+    "what is", "what are", "what's", "whats", "who", "when", "where",
+    "how many", "how much", "is there", "are there", "does it", "which",
+    "title of", "published", "what year", "what date",
+)
+
+
+def _wants_thinking(message: str, session_focus: Optional[str],
+                    thinking_mode: str) -> bool:
+    """Decide whether a request should run DeepSeek v4 chain-of-thought.
+
+    ``thinking_mode`` is the user's three-way toggle: "on" always thinks,
+    "off" never does. "auto" (Balanced) skips thinking for trivial/short-
+    factual requests and keeps it for anything analytical or substantive,
+    mirroring the marker-tuple style of ``_classify_scan_intent``.
+    """
+    if thinking_mode == "on":
+        return True
+    if thinking_mode == "off":
+        return False
+
+    msg = message.strip()
+    msg_lower = msg.lower()
+
+    # Exact trivial acknowledgements — no thinking needed.
+    if msg_lower in _TRIVIAL_PHRASES:
+        return False
+
+    # Analytical intent always thinks, even in short messages.
+    if _has_any(msg_lower, _ANALYSIS_MARKERS):
+        return True
+
+    # Deep session focuses keep thinking on by default.
+    if session_focus in ("brainstorming", "paper_discussion"):
+        return True
+
+    # Short greeting / chit-chat → skip thinking.
+    if len(msg) < 40 and _has_any(msg_lower, _GREETING_MARKERS):
+        return False
+
+    # Short factual lookup ("what's the title?", "when was it published?")
+    # → skip thinking.
+    if len(msg) <= 60 and _has_any(msg_lower, _FACTUAL_STEMS):
+        return False
+
+    # Default: bias toward quality — think.
+    return True
+
+
 def _classify_scan_intent(
     message: str,
     current_file: dict | None,
@@ -2438,20 +2517,26 @@ async def _stream_anthropic(
 async def _stream_openai_compatible(
     message: str, system_prompt: str, model: str, api_key: str, base_url: str,
     provider: str = "",
+    thinking: bool = True,
 ) -> AsyncGenerator[str, None]:
-    """Stream using the OpenAI-compatible SDK (DeepSeek, OpenAI, Groq, etc.)."""
+    """Stream using the OpenAI-compatible SDK (DeepSeek, OpenAI, Groq, etc.).
+
+    ``thinking`` only affects DeepSeek v4 models, which default to thinking
+    mode ON: chain-of-thought streams in delta.reasoning_content while
+    delta.content stays empty until the model finishes reasoning. Passing
+    ``thinking=False`` disables it for fast answers to simple questions.
+    """
     from openai import AsyncOpenAI
 
     client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 
-    # DeepSeek v4 models (pro/flash) default to thinking mode ON: chain-of-
-    # thought streams in delta.reasoning_content while delta.content stays
-    # empty until the model finishes reasoning. The old 8192-token budget
-    # could be exhausted by thinking alone — the stream then ended with ZERO
-    # content and the user saw a silent empty reply. Give thinking + answer
-    # room, and stream a "thinking" marker so the panel shows progress.
+    # The old 8192-token budget could be exhausted by thinking alone — the
+    # stream then ended with ZERO content and the user saw a silent empty
+    # reply. Give thinking + answer room, and stream a "thinking" marker so
+    # the panel shows progress. With thinking disabled the plain 8192 budget
+    # is plenty (no CoT consuming it).
     thinking_model = model.startswith("deepseek-v4")
-    max_tokens = 32768 if thinking_model else 8192
+    max_tokens = 32768 if (thinking_model and thinking) else 8192
 
     try:
         # Providers with prefix caching stream a final usage chunk (empty
@@ -2464,6 +2549,10 @@ async def _stream_openai_compatible(
         headers = _PROVIDER_EXTRA_HEADERS.get(provider)
         if headers:
             stream_kwargs["extra_headers"] = headers
+        if thinking_model:
+            stream_kwargs["extra_body"] = {
+                "thinking": {"type": "enabled" if thinking else "disabled"}
+            }
         stream = await client.chat.completions.create(
             model=model,
             messages=[
@@ -2552,17 +2641,28 @@ async def _sync_anthropic(
 async def _sync_openai_compatible(
     message: str, system_prompt: str, model: str, api_key: str, base_url: str,
     provider: str = "",
+    thinking: bool = True,
 ) -> str:
-    """Non-streaming call via OpenAI-compatible SDK."""
+    """Non-streaming call via OpenAI-compatible SDK.
+
+    ``thinking`` only affects DeepSeek v4 models (see
+    ``_stream_openai_compatible`` for the reasoning-budget context).
+    """
     from openai import AsyncOpenAI
 
     client = AsyncOpenAI(api_key=api_key, base_url=base_url)
     # DeepSeek v4 defaults to thinking mode — reasoning consumes output tokens
     # before any visible content, so give it a much larger budget than the
-    # generic 8192 (see _stream_openai_compatible for the full context).
-    max_tokens = 32768 if model.startswith("deepseek-v4") else 8192
+    # generic 8192 (see _stream_openai_compatible for the full context). With
+    # thinking disabled the plain 8192 budget is plenty (no CoT consuming it).
+    thinking_model = model.startswith("deepseek-v4")
+    max_tokens = 32768 if (thinking_model and thinking) else 8192
     headers = _PROVIDER_EXTRA_HEADERS.get(provider)
     create_kwargs = {"extra_headers": headers} if headers else {}
+    if thinking_model:
+        create_kwargs["extra_body"] = {
+            "thinking": {"type": "enabled" if thinking else "disabled"}
+        }
     response = await client.chat.completions.create(
         model=model,
         messages=[
@@ -2742,6 +2842,10 @@ async def send_message(req: ChatRequest):
             provider["model"], provider["api_key"],
         )
     else:
+        thinking = _wants_thinking(
+            req.message, req.session_focus,
+            provider.get("thinking_mode", "auto"),
+        )
         stream = _stream_openai_compatible(
             user_message,
             system_prompt,
@@ -2749,6 +2853,7 @@ async def send_message(req: ChatRequest):
             provider["api_key"],
             provider["base_url"],
             provider=provider["provider"],
+            thinking=thinking,
         )
 
     # Wrap so the exchange is buffered to memory on successful completion
@@ -2845,6 +2950,10 @@ async def send_message_sync(req: ChatRequest):
                 provider["model"], provider["api_key"],
             )
         else:
+            thinking = _wants_thinking(
+                req.message, req.session_focus,
+                provider.get("thinking_mode", "auto"),
+            )
             assistant_text = await _sync_openai_compatible(
                 user_message,
                 system_prompt,
@@ -2852,6 +2961,7 @@ async def send_message_sync(req: ChatRequest):
                 provider["api_key"],
                 provider["base_url"],
                 provider=provider["provider"],
+                thinking=thinking,
             )
     except Exception as exc:
         enriched = _enrich_error(str(exc), provider["provider"], provider["model"])
@@ -2895,6 +3005,7 @@ class ConfigureRequest(BaseModel):
     api_key: str = ""
     model: str = ""
     base_url: str = ""      # only for custom
+    thinking_mode: str = ""  # "auto" | "on" | "off" (DeepSeek v4 chain-of-thought)
     persist: bool = True    # save to .env for next restart
 
 
@@ -2908,6 +3019,7 @@ async def configure_llm(req: ConfigureRequest):
         model=req.model or None,
         api_key=req.api_key or None,
         base_url=req.base_url or None,
+        thinking_mode=req.thinking_mode or None,
     )
 
     if req.persist:
@@ -2922,6 +3034,7 @@ async def configure_llm(req: ConfigureRequest):
         "current": {
             "provider": current["provider"],
             "model": current["model"],
+            "thinking_mode": current.get("thinking_mode", "auto"),
             "configured": True,
         },
     }
@@ -3004,6 +3117,7 @@ async def list_providers():
         "current": {
             "provider": current["provider"] if current else "unknown",
             "model": current["model"] if current else "unknown",
+            "thinking_mode": current.get("thinking_mode", "auto") if current else "auto",
             "configured": current is not None,
         } if current else None,
         "available": [

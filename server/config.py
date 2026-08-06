@@ -68,6 +68,12 @@ LLM_MODEL = os.getenv("LLM_MODEL", "")
 # Base URL — only used for OpenAI-compatible providers (deepseek, openai, custom)
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "")
 
+# Thinking mode for reasoning models (deepseek-v4*): "auto" | "on" | "off"
+#   auto → skip chain-of-thought for trivial/short-factual questions
+#   on   → always think (default DeepSeek v4 behavior)
+#   off  → never think (fast, but shallower answers)
+LLM_THINKING_MODE = os.getenv("LLM_THINKING_MODE", "auto").lower()
+
 # Provider defaults
 PROVIDER_DEFAULTS = {
     "anthropic": {
@@ -142,7 +148,8 @@ _runtime_overrides: dict = {}
 
 
 def set_llm_config(provider: str = None, model: str = None,
-                   api_key: str = None, base_url: str = None) -> None:
+                   api_key: str = None, base_url: str = None,
+                   thinking_mode: str = None) -> None:
     """Override LLM config at runtime (takes effect immediately)."""
     global _runtime_overrides
     _runtime_overrides = {}
@@ -154,6 +161,8 @@ def set_llm_config(provider: str = None, model: str = None,
         _runtime_overrides["api_key"] = api_key
     if base_url is not None:  # allow empty to clear
         _runtime_overrides["base_url"] = base_url
+    if thinking_mode:
+        _runtime_overrides["thinking_mode"] = thinking_mode
 
 
 def _save_runtime_config_to_env() -> None:
@@ -173,6 +182,7 @@ def _save_runtime_config_to_env() -> None:
         lines.append(f"{key}={value}")
 
     _set_or_append("LLM_PROVIDER", config["provider"])
+    _set_or_append("LLM_THINKING_MODE", config.get("thinking_mode", "auto"))
     # Don't persist the placeholder API key for local providers — they don't
     # use one, and writing "local" here would leak a stale key if the user
     # later switches back to a cloud provider without re-entering a real key.
@@ -211,6 +221,9 @@ def get_llm_config() -> dict:
 
     api_key = _runtime_overrides.get("api_key") or LLM_API_KEY
 
+    # Thinking mode for reasoning models — runtime override takes precedence.
+    thinking_mode = _runtime_overrides.get("thinking_mode") or LLM_THINKING_MODE
+
     # Local LLM runtimes don't use an API key, but the OpenAI SDK rejects an
     # empty string — fill in a placeholder it will ignore.
     if not api_key and _is_local_provider(provider):
@@ -234,6 +247,7 @@ def get_llm_config() -> dict:
         "model": model,
         "api_key": api_key,
         "base_url": base_url,
+        "thinking_mode": thinking_mode,
     }
 
 
