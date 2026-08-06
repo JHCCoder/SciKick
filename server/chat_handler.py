@@ -2649,7 +2649,6 @@ async def _stream_anthropic(
                 "role": "user",
                 "content": _anthropic_content_blocks(stable, tail),
             }],
-            temperature=0.7,
         ) as stream:
             async for text in stream.text_stream:
                 yield f"data: {json.dumps({'type': 'text', 'content': text})}\n\n"
@@ -2813,7 +2812,6 @@ async def _sync_anthropic(
             "role": "user",
             "content": _anthropic_content_blocks(stable, tail),
         }],
-        temperature=0.7,
     )
     _record_cache_usage(model, getattr(response, "usage", None), "anthropic")
     return response.content[0].text
