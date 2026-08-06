@@ -52,7 +52,7 @@ GOOGLE_SCOPES = [
 #   kimi       → uses OpenAI-compatible SDK, base_url = https://api.moonshot.ai/v1 (intl; .cn is the China-only platform)
 #   grok       → uses OpenAI-compatible SDK, base_url = https://api.x.ai/v1
 #   minimax    → uses OpenAI-compatible SDK, base_url = https://api.minimax.io/v1
-#   qwen       → uses OpenAI-compatible SDK, base_url = https://dashscope.aliyuncs.com/compatible-mode/v1
+#   qwen       → uses OpenAI-compatible SDK, base_url = https://dashscope-intl.aliyuncs.com/compatible-mode/v1 (intl; dashscope.aliyuncs.com is CN-only)
 #   custom     → uses OpenAI-compatible SDK, base_url = LLM_BASE_URL (required)
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "anthropic").lower()
 
@@ -110,7 +110,7 @@ PROVIDER_DEFAULTS = {
     },
     "qwen": {
         "model": "qwen-plus",
-        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
     },
     "custom": {
         "model": "gpt-4o",  # user should override via LLM_MODEL

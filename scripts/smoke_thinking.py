@@ -37,7 +37,7 @@ DEFAULTS = {
     "kimi": "https://api.moonshot.ai/v1",
     "grok": "https://api.x.ai/v1",
     "minimax": "https://api.minimax.io/v1",
-    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "qwen": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
 }
 
 

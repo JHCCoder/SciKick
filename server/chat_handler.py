@@ -2424,11 +2424,14 @@ _MODEL_THINKING_FAMILY: dict[str, str] = {
     # its native always-on behavior; the Auto/On/Off buttons hide for it.
 }
 
-# Family -> how to DISABLE thinking (on = omit param -> natural default) and,
-# where chain-of-thought consumes the output budget, a larger max_tokens.
+# Family -> how to toggle thinking. "off" is the disable shape; an optional
+# "on" shape is sent when thinking is enabled for families that DON'T default
+# to thinking on when the param is omitted (qwen: enable_thinking defaults to
+# false). Families without "on" omit the param for on/auto-think (their
+# natural default is on). A "max_tokens" gives CoT room when thinking.
 _THINKING_PARAMS: dict[str, dict] = {
     "deepseek": {"off": {"thinking": {"type": "disabled"}}, "max_tokens": 32768},
-    "qwen":     {"off": {"enable_thinking": False}},
+    "qwen":     {"on": {"enable_thinking": True}, "off": {"enable_thinking": False}, "max_tokens": 32768},
     "glm":      {"off": {"thinking": {"type": "disabled"}}, "max_tokens": 32768},
     "kimi":     {"off": {"thinking": {"type": "disabled"}}, "max_tokens": 32768},
     "openai":   {"off": {"reasoning_effort": "none"}},
@@ -2700,8 +2703,13 @@ async def _stream_openai_compatible(
         # "on"/auto-think = omit the param (these families default to thinking
         # on); "off" sends the family's disable shape. Models not in the family
         # map get no thinking param at all.
-        if params and not thinking:
-            stream_kwargs["extra_body"] = params["off"]
+        if params:
+            if not thinking:
+                stream_kwargs["extra_body"] = params["off"]
+            elif "on" in params:
+                # Families whose default is thinking OFF (qwen: enable_thinking
+                # omits to false) need the explicit on-shape; others omit.
+                stream_kwargs["extra_body"] = params["on"]
         stream = await client.chat.completions.create(
             model=model,
             messages=[
@@ -2829,8 +2837,13 @@ async def _sync_openai_compatible(
     # "on"/auto-think = omit the param (these families default to thinking on);
     # "off" sends the family's disable shape. Models not in the family map get
     # no thinking param at all.
-    if params and not thinking:
-        create_kwargs["extra_body"] = params["off"]
+    if params:
+        if not thinking:
+            create_kwargs["extra_body"] = params["off"]
+        elif "on" in params:
+            # Families whose default is thinking OFF (qwen: enable_thinking
+            # omits to false) need the explicit on-shape; others omit.
+            create_kwargs["extra_body"] = params["on"]
     response = await client.chat.completions.create(
         model=model,
         messages=[
