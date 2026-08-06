@@ -2412,7 +2412,9 @@ _MODEL_THINKING_FAMILY: dict[str, str] = {
     "glm-4.5-air": "glm",
     # kimi — k3/k2.7-code can't toggle, excluded
     "kimi-k2.5": "kimi", "kimi-k2.6": "kimi",
-    # openai — gpt-5 (minimal only) and gpt-4.x excluded; gpt-5.3 pending verify
+    # openai — gpt-5 (minimal only) and gpt-4.x excluded; gpt-5.3 pending verify.
+    # gpt-5.x omitting reasoning_effort defaults to NO reasoning (like qwen), so
+    # the family has an explicit "on" shape (medium) — see _THINKING_PARAMS.
     "gpt-5.1": "openai", "gpt-5.2": "openai",
     # minimax — only M3; M2.x always think
     "MiniMax-M3": "minimax",
@@ -2434,7 +2436,7 @@ _THINKING_PARAMS: dict[str, dict] = {
     "qwen":     {"on": {"enable_thinking": True}, "off": {"enable_thinking": False}, "max_tokens": 32768},
     "glm":      {"off": {"thinking": {"type": "disabled"}}, "max_tokens": 32768},
     "kimi":     {"off": {"thinking": {"type": "disabled"}}, "max_tokens": 32768},
-    "openai":   {"off": {"reasoning_effort": "none"}},
+    "openai":   {"on": {"reasoning_effort": "medium"}, "off": {"reasoning_effort": "none"}},
     # MiniMax-M3's on-mode is "adaptive", NOT "enabled" (sending enabled 400s) —
     # omit-on sidesteps that entirely.
     "minimax":  {"off": {"thinking": {"type": "disabled"}}},
@@ -2448,6 +2450,7 @@ _THINKING_PARAMS: dict[str, dict] = {
 # Keyed by provider id; absent → 0.7. Kept in sync by update-models.
 _TEMPERATURE_DEFAULTS: dict[str, float | dict[bool, float]] = {
     "kimi": {True: 1.0, False: 0.6},
+    "openai": 1.0,  # gpt-5.x only accepts the default (1); gpt-4o/4.1 accept it too
 }
 
 
@@ -2457,6 +2460,11 @@ def _sampling_temperature(provider: str, thinking: bool) -> float:
     if isinstance(t, dict):
         return t.get(thinking, 0.7)
     return t if t is not None else 0.7
+
+
+def _max_tokens_kwarg(model: str) -> str:
+    """OpenAI's gpt-5.x family rejects max_tokens — it requires max_completion_tokens."""
+    return "max_completion_tokens" if model.startswith("gpt-5") else "max_tokens"
 
 
 def _thinking_capable(model: str) -> bool:
@@ -2717,7 +2725,7 @@ async def _stream_openai_compatible(
                 {"role": "user", "content": message},
             ],
             temperature=_sampling_temperature(provider, thinking),
-            max_tokens=max_tokens,
+            **{_max_tokens_kwarg(model): max_tokens},
             stream=True,
             **stream_kwargs,
         )
@@ -2851,7 +2859,7 @@ async def _sync_openai_compatible(
             {"role": "user", "content": message},
         ],
         temperature=_sampling_temperature(provider, thinking),
-        max_tokens=max_tokens,
+        **{_max_tokens_kwarg(model): max_tokens},
         **create_kwargs,
     )
     _record_cache_usage(model, getattr(response, "usage", None), provider)
