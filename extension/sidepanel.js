@@ -2066,7 +2066,8 @@ async function refreshScanButtonState() {
     const res = await fetch(`${SERVER_URL}/chat/context`);
     if (res.ok) {
       const data = await res.json();
-      kept = (data.loaded_docs || []).some(d => d.file_id === viewingFile.id);
+      kept = (data.loaded_docs || []).some(d => d.file_id === viewingFile.id)
+          || data.manuscript_file_id === viewingFile.id;
     }
   } catch (err) { /* ignore — default to scan mode */ }
   if (kept) {

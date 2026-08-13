@@ -3693,6 +3693,8 @@ async def get_context():
     return {
         "loaded": loaded,
         "paper": paper,
+        "manuscript_file_id": _current_doc_file_id,
+        "manuscript_file_name": _current_doc_file_name,
         "comments": comments,
         "images": images,
         "scraped_papers": scraped_papers,
@@ -3786,9 +3788,54 @@ async def remove_loaded_doc(index: int = None, file_id: str = None):
     return {"status": "cleared", "removed": count}
 
 
+async def _refresh_manuscript() -> tuple[list[dict], list[str], list[dict]]:
+    """Re-download + re-parse the loaded manuscript and swap ``_current_doc``.
+
+    Text-only re-parse (``figure_ocr=False``), matching how Load Project builds
+    ``_current_doc``, so an "Update" picks up Drive edits without the slow
+    per-image OCR pass. Returns ``(updated, unchanged, failed)`` in the same
+    shape as the kept-doc path. Cache-aware: an unchanged manuscript keeps the
+    exact same ``_current_doc`` object, so the injected ## Manuscript block
+    stays byte-identical and the provider's prefix cache survives.
+    """
+    global _current_doc, _focused_file_cache
+    name = _current_doc_file_name or (_current_doc.title if _current_doc else "Manuscript")
+    old_text = _current_doc.full_text if _current_doc is not None else ""
+    try:
+        from drive_sync import download_file, _parse_downloaded
+        from config import PDF_DEFAULT_MODE
+
+        downloaded = await download_file(_current_doc_file_id)
+        file_dict = {"name": name, "mimeType": downloaded.get("mimeType", "")}
+        fresh = await asyncio.to_thread(
+            _parse_downloaded, file_dict, downloaded,
+            pdf_mode=PDF_DEFAULT_MODE, figure_ocr=False,
+        )
+    except Exception as exc:
+        logger.warning("Update-context: manuscript '%s' failed: %s", name, exc)
+        return [], [], [{"name": name, "error": str(exc)}]
+
+    if fresh is None or not fresh.full_text:
+        return [], [], [{"name": name, "error": "download or parse failed"}]
+
+    if fresh.full_text == old_text:
+        logger.info("Update-context: manuscript '%s' unchanged (%d chars) — cache preserved", name, len(fresh.full_text))
+        return [], [name], []
+
+    _current_doc = fresh
+    # Drop cached one-shot scans of this file so a later focus re-reads fresh.
+    _focused_file_cache.pop((_current_doc_file_id, True), None)
+    _focused_file_cache.pop((_current_doc_file_id, False), None)
+    logger.info(
+        "Update-context: refreshed manuscript '%s' (%d -> %d chars)",
+        name, len(old_text), len(fresh.full_text),
+    )
+    return [{"name": name, "chars": len(fresh.full_text)}], [], []
+
+
 @router.post("/update-context")
 async def update_context(file_id: str = None):
-    """Re-fetch kept document(s) from Drive and refresh their context text.
+    """Re-fetch the open document(s) from Drive and refresh their context text.
 
     Cache-aware refresh: a document is only replaced when its freshly parsed
     text actually differs from what's kept. An unchanged file keeps the exact
@@ -3797,22 +3844,39 @@ async def update_context(file_id: str = None):
     preserved — a changed document invalidates the cache only from that
     document onward.
 
-    Optional ``?file_id=...`` limits the refresh to one kept document; omit to
-    refresh all kept documents.
+    With ``?file_id=...`` the refresh targets one document:
+      * the loaded manuscript (``_current_doc_file_id``) — re-parsed text-only,
+        matching Load Project;
+      * a kept document in ``_loaded_docs`` — re-parsed with figure OCR.
+    Omit ``file_id`` to refresh every kept document.
     """
     async with _state_lock:
+        updated: list[dict] = []
+        unchanged: list[str] = []
+        failed: list[dict] = []
+
+        # The manuscript is injected as ## Manuscript from _current_doc (a
+        # text-only parse), NOT from _loaded_docs, so it has its own refresh
+        # path. When it's also kept, the kept-doc loop below refreshes the
+        # OCR'd copy in addition to the text-only _current_doc here.
+        is_manuscript = bool(
+            file_id and _current_doc is not None and file_id == _current_doc_file_id
+        )
+        if is_manuscript:
+            m_updated, m_unchanged, m_failed = await _refresh_manuscript()
+            updated.extend(m_updated)
+            unchanged.extend(m_unchanged)
+            failed.extend(m_failed)
+
         if file_id:
-            if not _is_kept_doc(file_id):
+            if not is_manuscript and not _is_kept_doc(file_id):
                 raise HTTPException(status_code=404, detail=f"No loaded document with file_id {file_id}")
             targets = [d for d in _loaded_docs if d["file_id"] == file_id]
         else:
             targets = list(_loaded_docs)
-        if not targets:
+        if not targets and not is_manuscript:
             return {"updated": [], "unchanged": [], "failed": [], "note": "No kept documents to update"}
 
-        updated: list[dict] = []
-        unchanged: list[str] = []
-        failed: list[dict] = []
         for doc in targets:
             name = doc["name"]
             old_text = doc["text"]
