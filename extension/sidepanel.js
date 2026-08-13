@@ -110,6 +110,15 @@ const dom = {
   btnSearchClose: $("#btn-search-close"),
   searchInput: $("#search-input"),
   searchResults: $("#search-results"),
+  // Pin panel
+  btnPin: $("#btn-pin"),
+  pinPanel: $("#pin-panel"),
+  btnPinClose: $("#btn-pin-close"),
+  pinList: $("#pin-list"),
+  pinCount: $("#pin-count"),
+  // Context menu
+  ctxMenu: $("#ctx-menu"),
+  ctxMenuPin: $("#ctx-menu-pin"),
   // Context window
   ctxBar: $("#context-usage-bar"),
   ctxFill: $("#ctx-fill-bar"),
@@ -1529,6 +1538,25 @@ if (dom.btnInfoClose) dom.btnInfoClose.addEventListener("click", closeInfoPanel)
 dom.btnSearch.addEventListener("click", toggleSearchPanel);
 if (dom.btnSearchClose) dom.btnSearchClose.addEventListener("click", closeSearchPanel);
 dom.searchInput.addEventListener("input", runSearch);
+
+// Pin panel
+dom.btnPin.addEventListener("click", togglePinPanel);
+if (dom.btnPinClose) dom.btnPinClose.addEventListener("click", closePinPanel);
+
+// Right-click context menu (pin/unpin a message)
+dom.messages.addEventListener("contextmenu", onMessageContextMenu);
+dom.ctxMenuPin.addEventListener("click", onCtxPinClick);
+document.addEventListener("click", (e) => {
+  if (!dom.ctxMenu.contains(e.target)) hideContextMenu();
+});
+document.addEventListener("contextmenu", () => hideContextMenu());
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") hideContextMenu();
+});
+
+// Keep pinned-message staleness in sync whenever messages are added/removed
+// (e.g. a cleared chat orphans the pinned DOM elements).
+new MutationObserver(() => renderPinPanel()).observe(dom.messages, { childList: true });
 // Thinking toggle is rebuilt inside #context-hint on every provider-hint
 // render — delegate the click so it works without re-binding each time.
 dom.contextHint.addEventListener("click", (e) => {
@@ -1637,6 +1665,127 @@ function jumpToMessage(el) {
   el.scrollIntoView({ behavior: "smooth", block: "center" });
   el.classList.add("search-flash");
   setTimeout(() => el.classList.remove("search-flash"), 1500);
+}
+
+// --- Pinned messages ---
+
+let pins = [];        // { el, role, text } — session-scoped (lost on panel reload)
+let ctxTarget = null; // .message element last right-clicked
+
+function togglePinPanel() {
+  if (!dom.pinPanel.classList.contains("hidden")) {
+    closePinPanel();
+    return;
+  }
+  dom.pinPanel.classList.remove("hidden");
+  renderPinPanel();
+}
+
+function closePinPanel() {
+  dom.pinPanel.classList.add("hidden");
+}
+
+function messageRole(el) {
+  if (el.classList.contains("user")) return "You";
+  if (el.classList.contains("assistant")) return "Assistant";
+  return "System";
+}
+
+function pinMessage(el) {
+  if (pins.some((p) => p.el === el)) return;
+  const text = (el.textContent || "").trim();
+  if (!text) return;
+  pins.push({ el, role: messageRole(el), text });
+  renderPinPanel();
+}
+
+function unpinMessage(el) {
+  pins = pins.filter((p) => p.el !== el);
+  renderPinPanel();
+}
+
+function renderPinPanel() {
+  if (dom.pinCount) {
+    if (pins.length) {
+      dom.pinCount.textContent = pins.length;
+      dom.pinCount.classList.remove("hidden");
+    } else {
+      dom.pinCount.classList.add("hidden");
+    }
+  }
+  dom.btnPin.title = pins.length ? `Pinned messages (${pins.length})` : "Pinned messages";
+
+  if (!pins.length) {
+    dom.pinList.innerHTML =
+      '<div class="pin-empty">No pinned messages yet. Right-click a message and choose "Pin message".</div>';
+    return;
+  }
+
+  dom.pinList.innerHTML = pins.map((p, i) => {
+    const stale = !(p.el && p.el.isConnected);
+    const preview = p.text.length > 160 ? p.text.slice(0, 160).trim() + "…" : p.text;
+    return `
+      <div class="pin-item${stale ? " pin-stale" : ""}" data-i="${i}">
+        <button class="pin-jump" title="${stale ? "This message is no longer in the chat" : "Jump to message"}">
+          <span class="pin-role">${p.role}</span>
+          <span class="pin-text">${escHtml(preview)}</span>
+        </button>
+        <button class="pin-remove" title="Unpin">✕</button>
+      </div>
+    `;
+  }).join("");
+
+  dom.pinList.querySelectorAll(".pin-jump").forEach((btn) => {
+    btn.addEventListener("click", () => jumpToPin(Number(btn.closest(".pin-item").dataset.i)));
+  });
+  dom.pinList.querySelectorAll(".pin-remove").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const i = Number(btn.closest(".pin-item").dataset.i);
+      if (pins[i]) unpinMessage(pins[i].el);
+    });
+  });
+}
+
+function jumpToPin(i) {
+  const p = pins[i];
+  if (!p || !p.el || !p.el.isConnected) return;
+  p.el.scrollIntoView({ behavior: "smooth", block: "center" });
+  p.el.classList.add("search-flash");
+  setTimeout(() => p.el.classList.remove("search-flash"), 1500);
+}
+
+// --- Right-click context menu ---
+
+function onMessageContextMenu(e) {
+  const msg = e.target.closest(".message");
+  if (!msg) return;
+  e.preventDefault();
+  e.stopPropagation();
+  ctxTarget = msg;
+  dom.ctxMenuPin.textContent = pins.some((p) => p.el === msg) ? "📌 Unpin message" : "📌 Pin message";
+  dom.ctxMenu.classList.remove("hidden");
+
+  // Measure, then clamp within the viewport so the menu never clips.
+  const rect = dom.ctxMenu.getBoundingClientRect();
+  const left = Math.min(e.clientX, window.innerWidth - rect.width - 8);
+  const top = Math.min(e.clientY, window.innerHeight - rect.height - 8);
+  dom.ctxMenu.style.left = Math.max(8, left) + "px";
+  dom.ctxMenu.style.top = Math.max(8, top) + "px";
+}
+
+function onCtxPinClick() {
+  if (!ctxTarget) return;
+  if (pins.some((p) => p.el === ctxTarget)) {
+    unpinMessage(ctxTarget);
+  } else {
+    pinMessage(ctxTarget);
+  }
+  hideContextMenu();
+}
+
+function hideContextMenu() {
+  dom.ctxMenu.classList.add("hidden");
+  ctxTarget = null;
 }
 
 async function loadInfoPanel() {

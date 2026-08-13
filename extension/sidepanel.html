@@ -13,6 +13,7 @@
     <h1 id="project-name">SciKick</h1>
     <button id="btn-info" title="Loaded data">ℹ</button>
     <button id="btn-search" title="Search conversation">🔍</button>
+    <button id="btn-pin" title="Pinned messages">📌<span id="pin-count" class="topbar-badge hidden"></span></button>
     <button id="btn-clear" title="Clear chat">—</button>
     <button id="btn-theme" title="Toggle theme">🌙</button>
     <button id="btn-settings" title="LLM Settings">⚙</button>
@@ -88,6 +89,15 @@
       <input type="text" id="search-input" placeholder="Search the conversation…" autocomplete="off">
       <div id="search-results"></div>
     </div>
+  </div>
+
+  <!-- Pin Panel (hidden by default) -->
+  <div id="pin-panel" class="hidden">
+    <div class="pin-header">
+      <h3>📌 Pinned Messages</h3>
+      <button id="btn-pin-close" title="Close">✕</button>
+    </div>
+    <div class="pin-body" id="pin-list"></div>
   </div>
 
   <!-- Connection Banner (shown when not connected). Starts hidden so it
@@ -224,6 +234,11 @@
       </div>
     </div>
   </footer>
+
+  <!-- Right-click context menu (pin message) -->
+  <div id="ctx-menu" class="hidden">
+    <button id="ctx-menu-pin">📌 Pin message</button>
+  </div>
 
   <script src="sidepanel.js"></script>
 </body>
