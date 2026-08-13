@@ -159,6 +159,18 @@ body {
   text-shadow: 0 0 0 var(--text-primary);
 }
 
+/* Search/pin are emoji too — render them monochrome to match ℹ / ⚙ / ⟳. */
+#topbar #btn-search,
+#topbar #btn-pin {
+  color: transparent;
+  text-shadow: 0 0 0 var(--text-secondary);
+}
+#topbar #btn-search:hover,
+#topbar #btn-pin:hover {
+  color: transparent;
+  text-shadow: 0 0 0 var(--text-primary);
+}
+
 /* --- Banners --- */
 .banner {
   padding: 12px;
@@ -791,6 +803,7 @@ body {
   font-weight: 700;
   text-align: center;
   pointer-events: none;
+  text-shadow: none; /* don't inherit the pin button's monochrome-emoji shadow */
 }
 
 /* --- Right-click context menu --- */
