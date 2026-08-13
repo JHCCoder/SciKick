@@ -701,10 +701,15 @@ async def _download_and_parse_file(file_id: str, file_name: str, figure_ocr: boo
             doc = await asyncio.to_thread(parse_pdf, content_bytes, file_name, "auto", figure_ocr)
             parsed_text = doc.full_text
         elif mime == "application/vnd.google-apps.document" and "content_bytes" in downloaded:
-            # Google Doc — now exported as PDF so embedded figures get OCR'd.
+            # Google Doc — exported as PDF (embedded figures get OCR'd) + text/plain
+            # (authoritative body text; the PDF text layer fragments around comment
+            # anchors, so the plain-text export overrides it).
             from file_processor import parse_pdf
             content_bytes = bytes.fromhex(downloaded["content_bytes"])
-            doc = await asyncio.to_thread(parse_pdf, content_bytes, file_name, "auto", figure_ocr)
+            doc = await asyncio.to_thread(
+                parse_pdf, content_bytes, file_name, "auto", figure_ocr,
+                downloaded.get("text", ""),
+            )
             parsed_text = doc.full_text
         elif mime in ("application/vnd.openxmlformats-officedocument.wordprocessingml.document",) and "content_bytes" in downloaded:
             from file_processor import parse_docx

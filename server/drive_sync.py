@@ -473,34 +473,42 @@ def _download_file_sync(file_id: str) -> dict:
         }
 
 
-def _export_google_file(service, file_id: str, mime_type: str) -> str:
-    """Export a Google-native file to the given MIME type, return base64."""
-    import base64
-
+def _export_google_bytes(service, file_id: str, mime_type: str) -> bytes:
+    """Export a Google-native file to ``mime_type``, returning raw bytes."""
     request = service.files().export_media(fileId=file_id, mimeType=mime_type)
     buffer = io.BytesIO()
     downloader = MediaIoBaseDownload(buffer, request, chunksize=_DOWNLOAD_CHUNK_SIZE)
     _download_media_with_retry(downloader, file_id)
-    return base64.b64encode(buffer.getvalue()).decode("ascii")
+    return buffer.getvalue()
+
+
+def _export_google_file(service, file_id: str, mime_type: str) -> str:
+    """Export a Google-native file to the given MIME type, return base64."""
+    import base64
+
+    return base64.b64encode(_export_google_bytes(service, file_id, mime_type)).decode("ascii")
 
 
 def _export_google_doc(service, file_id: str, file_name: str) -> dict:
-    """Export a Google Doc as a PDF so it goes through the full parse_pdf
-    pipeline (native text layer + page-level OCR on scanned pages + per-image
-    figure OCR). The markdown export drops embedded images, so a Doc with
-    figure PNGs would lose them; the PDF export embeds them as extractable
-    raster images. Returns the same shape as a binary PDF download.
+    """Export a Google Doc as BOTH a PDF and text/plain.
+
+    The PDF goes through the full parse_pdf pipeline (page-level OCR on scanned
+    pages + per-image figure OCR) and embeds figures as extractable raster
+    images — the markdown export would drop them. But Google Docs comments are
+    anchored metadata, not body text: the PDF export splits a commented range
+    into a detached text span that pdfplumber drops or reorders, producing a
+    "cut" in the extracted text at the start of a comment block. The text/plain
+    export keeps the body text contiguous and simply omits comments, so it is
+    carried alongside as the authoritative ``text``; parsers use it to override
+    the reconstructed PDF text while still mining figures from the PDF.
     """
-    request = service.files().export_media(
-        fileId=file_id, mimeType="application/pdf"
-    )
-    buffer = io.BytesIO()
-    downloader = MediaIoBaseDownload(buffer, request, chunksize=_DOWNLOAD_CHUNK_SIZE)
-    _download_media_with_retry(downloader, file_id)
+    pdf_bytes = _export_google_bytes(service, file_id, "application/pdf")
+    text_bytes = _export_google_bytes(service, file_id, "text/plain")
     return {
         "name": file_name,
         "mimeType": "application/pdf",
-        "content_bytes": buffer.getvalue().hex(),  # hex-encoded for JSON transport
+        "content_bytes": pdf_bytes.hex(),  # hex-encoded for JSON transport
+        "text": text_bytes.decode("utf-8", errors="replace"),
     }
 
 
@@ -877,11 +885,16 @@ async def load_context(folder_id: str, force: bool = False):
             if mt == "application/vnd.google-apps.spreadsheet" and "sheets" in downloaded:
                 comments.extend(extract_reviewer_comments_from_sheets(downloaded["sheets"]))
             elif mt == "application/vnd.google-apps.document" and "content_bytes" in downloaded:
-                # Google Doc comment file — now exported as PDF. Parse it and
-                # extract comments from the text. figure OCR is off — comments
-                # live in the text layer, not inside figures.
+                # Google Doc comment file — exported as PDF + text/plain. Parse
+                # the PDF (figure OCR off — comments live in text, not figures)
+                # and override the reconstructed text with the text/plain export
+                # so comment anchors don't fragment the comment text.
                 from file_processor import parse_pdf
-                cdoc = parse_pdf(bytes.fromhex(downloaded["content_bytes"]), cf["name"], mode=PDF_DEFAULT_MODE, figure_ocr=False)
+                cdoc = parse_pdf(
+                    bytes.fromhex(downloaded["content_bytes"]), cf["name"],
+                    mode=PDF_DEFAULT_MODE, figure_ocr=False,
+                    text_layer_override=downloaded.get("text", ""),
+                )
                 comments.extend(extract_reviewer_comments(cdoc.full_text))
             elif "text" in downloaded:
                 comments.extend(extract_reviewer_comments(downloaded["text"]))
@@ -1192,11 +1205,16 @@ def _parse_downloaded(file_dict: dict, downloaded: dict, pdf_mode: str = "auto",
     if mime == "application/pdf":
         return parse_pdf(bytes.fromhex(downloaded["content_bytes"]), name, mode=pdf_mode, figure_ocr=figure_ocr)
     if mime == "application/vnd.google-apps.document":
-        # Google Doc — _export_google_doc exports it as PDF (content_bytes) so
-        # embedded figures get OCR'd via parse_pdf. Falls through to parse_text
-        # only for legacy callers still returning markdown text.
+        # Google Doc — _export_google_doc exports it as PDF (content_bytes, so
+        # embedded figures get OCR'd via parse_pdf) AND text/plain (authoritative
+        # body text overriding the PDF text layer that fragments around comment
+        # anchors). Falls through to parse_text only for legacy callers.
         if "content_bytes" in downloaded:
-            return parse_pdf(bytes.fromhex(downloaded["content_bytes"]), name, mode=pdf_mode, figure_ocr=figure_ocr)
+            return parse_pdf(
+                bytes.fromhex(downloaded["content_bytes"]), name,
+                mode=pdf_mode, figure_ocr=figure_ocr,
+                text_layer_override=downloaded.get("text", ""),
+            )
         return parse_text(downloaded.get("text", ""), name)
     if mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
         return parse_docx(bytes.fromhex(downloaded["content_bytes"]), name, figure_ocr=figure_ocr)

@@ -462,3 +462,56 @@ def test_gdoc_comment_file_extracts_comments_from_parsed_text(monkeypatch):
     comments = extract_reviewer_comments(parsed.full_text)
     assert len(comments) >= 1
     assert comments[0].reviewer == "Reviewer 1"
+
+
+@needs_fitz
+def test_gdoc_text_override_replaces_pdf_text_layer():
+    # A Google Doc export now carries BOTH content_bytes (PDF) and text
+    # (text/plain). The text/plain body is authoritative and must replace the
+    # PDF text layer, which fragments around comment anchors.
+    from drive_sync import _parse_downloaded
+    import fitz
+    pdf_doc = fitz.open()
+    page = pdf_doc.new_page()
+    page.insert_text((72, 96), "PDF native text layer with a comment cut", fontsize=14)
+    pdf = pdf_doc.tobytes()
+    file_dict = {
+        "name": "Manuscript.gdoc",
+        "mimeType": "application/vnd.google-apps.document",
+        "size": len(pdf),
+    }
+    clean_text = "The full manuscript body, contiguous and without comment cuts."
+    downloaded = {
+        "content_bytes": pdf.hex(),
+        "mimeType": "application/pdf",
+        "text": clean_text,
+    }
+    parsed = _parse_downloaded(file_dict, downloaded, pdf_mode="auto")
+    assert parsed.full_text == clean_text
+    assert "PDF native text layer" not in parsed.full_text
+
+
+@needs_fitz
+@pytest.mark.skipif(not _ocr_available(), reason="OCR deps not installed")
+def test_gdoc_text_override_preserves_figure_ocr():
+    # Same split export, but with figure_ocr=True: the clean text/plain body
+    # replaces the PDF text layer while per-image figure OCR still runs against
+    # the PDF and its results are preserved ("read both text and figure").
+    from drive_sync import _parse_downloaded
+    pdf = _make_pdf_with_figure()
+    file_dict = {
+        "name": "Manuscript.gdoc",
+        "mimeType": "application/vnd.google-apps.document",
+        "size": len(pdf),
+    }
+    clean_text = "Clean body text that must win over the PDF text layer."
+    downloaded = {
+        "content_bytes": pdf.hex(),
+        "mimeType": "application/pdf",
+        "text": clean_text,
+    }
+    parsed = _parse_downloaded(file_dict, downloaded, pdf_mode="auto", figure_ocr=True)
+    assert clean_text in parsed.full_text
+    assert "Main body text" not in parsed.full_text  # PDF native text replaced
+    assert "42" in parsed.full_text  # figure-OCR block preserved
+    assert parsed.figure_ocr_count == 1

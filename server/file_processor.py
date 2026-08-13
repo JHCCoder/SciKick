@@ -92,12 +92,17 @@ _PDF_PARSE_CACHE: "_OrderedDict[tuple[str, str, int], PaperDocument]" = _Ordered
 _PDF_PARSE_CACHE_MAX = 16
 
 
-def _cache_key(content: bytes, mode: str, figure_ocr: bool) -> tuple[str, str, int, int]:
+def _cache_key(content: bytes, mode: str, figure_ocr: bool, text_layer_override: str = "") -> tuple[str, str, int, int, str]:
     import hashlib
 
     from config import PDF_PARSER_VERSION
 
-    return (hashlib.sha256(content).hexdigest()[:16], mode, int(figure_ocr), PDF_PARSER_VERSION)
+    override_hash = (
+        hashlib.sha256(text_layer_override.encode("utf-8")).hexdigest()[:16]
+        if text_layer_override
+        else ""
+    )
+    return (hashlib.sha256(content).hexdigest()[:16], mode, int(figure_ocr), PDF_PARSER_VERSION, override_hash)
 
 
 def _native_text_is_deficient(text: str) -> bool:
@@ -248,7 +253,7 @@ def _ocr_embedded_images(content: bytes, skip_pages: set[int]) -> list[tuple[int
     return results
 
 
-def parse_pdf(content: bytes, filename: str, mode: str = "auto", figure_ocr: bool = True) -> PaperDocument:
+def parse_pdf(content: bytes, filename: str, mode: str = "auto", figure_ocr: bool = True, text_layer_override: str = "") -> PaperDocument:
     """Extract text and figures from a PDF.
 
     mode:
@@ -263,6 +268,15 @@ def parse_pdf(content: bytes, filename: str, mode: str = "auto", figure_ocr: boo
       blocks. When False, skip that pass — used at Load Project for speed
       (figure OCR is the slow part); page-level OCR on deficient pages still
       runs. Scan-and-keep passes True for the full treatment.
+
+    text_layer_override:
+      When non-empty, replaces the reconstructed per-page text with this
+      authoritative body text. Used for Google Docs, whose PDF export
+      fragments text around comment anchors (a "cut" at the start of a
+      commented range) while the text/plain export keeps the body contiguous.
+      The PDF is still parsed for figures and per-image figure OCR, so those
+      blocks are preserved and appended as usual; page-level OCR is skipped
+      since the override already provides the body text.
     """
     import pdfplumber
 
@@ -283,8 +297,12 @@ def parse_pdf(content: bytes, filename: str, mode: str = "auto", figure_ocr: boo
     if mode == "auto" and not PDF_OCR_ENABLED:
         mode = "fast"
 
+    # Authoritative body text supplied by the caller (e.g. a Google Doc's
+    # text/plain export). Empty/whitespace → no override.
+    override = (text_layer_override or "").strip()
+
     # Parse cache (decision 6).
-    key = _cache_key(content, mode, figure_ocr)
+    key = _cache_key(content, mode, figure_ocr, override)
     cached = _PDF_PARSE_CACHE.get(key)
     if cached is not None:
         _PDF_PARSE_CACHE.move_to_end(key)
@@ -319,7 +337,7 @@ def parse_pdf(content: bytes, filename: str, mode: str = "auto", figure_ocr: boo
     ocr_deficient_reason: str = ""         # "not_installed" | "over_cap" | "page_failed"
     ocr_text_by_page: dict[int, str] = {}  # 0-indexed -> recovered text
 
-    if mode == "auto" and deficient_pages:
+    if mode == "auto" and deficient_pages and not override:
         from pdf_capabilities import get_pdf_capabilities
 
         caps = get_pdf_capabilities()
@@ -348,12 +366,18 @@ def parse_pdf(content: bytes, filename: str, mode: str = "auto", figure_ocr: boo
                 ocr_deficient_reason = "page_failed"
 
     # Pass 2: assemble full_text in document order, substituting OCR text for
-    # recovered pages and keeping native text (even if empty) otherwise.
-    for i, native_text, _deficient in page_native:
-        if i in ocr_text_by_page:
-            full_text_parts.append(ocr_text_by_page[i])
-        else:
-            full_text_parts.append(native_text)
+    # recovered pages and keeping native text (even if empty) otherwise. When a
+    # caller supplied an authoritative text layer, use it as the sole body text
+    # instead of the reconstructed per-page text (which, for Google Docs, is
+    # fragmented around comment anchors).
+    if override:
+        full_text_parts.append(override)
+    else:
+        for i, native_text, _deficient in page_native:
+            if i in ocr_text_by_page:
+                full_text_parts.append(ocr_text_by_page[i])
+            else:
+                full_text_parts.append(native_text)
 
     # Per-image figure OCR (auto mode only): recover text inside embedded
     # figure images on any page. Skips pages already page-level-OCR'd above.
