@@ -104,6 +104,12 @@ const dom = {
   infoPanel: $("#info-panel"),
   btnInfoClose: $("#btn-info-close"),
   infoBody: $("#info-body"),
+  // Search panel
+  btnSearch: $("#btn-search"),
+  searchPanel: $("#search-panel"),
+  btnSearchClose: $("#btn-search-close"),
+  searchInput: $("#search-input"),
+  searchResults: $("#search-results"),
   // Context window
   ctxBar: $("#context-usage-bar"),
   ctxFill: $("#ctx-fill-bar"),
@@ -1518,6 +1524,11 @@ dom.cfgProvider.addEventListener("change", handleProviderChange);
 // Info panel
 dom.btnInfo.addEventListener("click", toggleInfoPanel);
 if (dom.btnInfoClose) dom.btnInfoClose.addEventListener("click", closeInfoPanel);
+
+// Search panel
+dom.btnSearch.addEventListener("click", toggleSearchPanel);
+if (dom.btnSearchClose) dom.btnSearchClose.addEventListener("click", closeSearchPanel);
+dom.searchInput.addEventListener("input", runSearch);
 // Thinking toggle is rebuilt inside #context-hint on every provider-hint
 // render — delegate the click so it works without re-binding each time.
 dom.contextHint.addEventListener("click", (e) => {
@@ -1536,6 +1547,96 @@ async function toggleInfoPanel() {
 
 function closeInfoPanel() {
   dom.infoPanel.classList.add("hidden");
+}
+
+// --- Conversation search ---
+
+function toggleSearchPanel() {
+  if (!dom.searchPanel.classList.contains("hidden")) {
+    closeSearchPanel();
+    return;
+  }
+  dom.searchPanel.classList.remove("hidden");
+  dom.searchInput.value = "";
+  dom.searchResults.innerHTML = "";
+  dom.searchInput.focus();
+}
+
+function closeSearchPanel() {
+  dom.searchPanel.classList.add("hidden");
+}
+
+function runSearch() {
+  const query = dom.searchInput.value.trim();
+  dom.searchResults.innerHTML = "";
+
+  if (!query) return;
+
+  const q = query.toLowerCase();
+  const messages = $$("#messages .message");
+  const hits = [];
+
+  messages.forEach((msg) => {
+    const raw = msg.textContent || "";
+    const lower = raw.toLowerCase();
+    const rawIdx = lower.indexOf(q);
+    if (rawIdx === -1) return;
+
+    // Count all occurrences so the result badge can signal repeats.
+    let count = 0;
+    let pos = 0;
+    while ((pos = lower.indexOf(q, pos)) !== -1) {
+      count++;
+      pos += q.length;
+    }
+
+    // Snippet centered on the first match, with the match highlighted.
+    const start = Math.max(0, rawIdx - 40);
+    const end = Math.min(raw.length, rawIdx + query.length + 60);
+    const before = raw.slice(start, rawIdx).trim();
+    const match = raw.slice(rawIdx, rawIdx + query.length);
+    const after = raw.slice(rawIdx + query.length, end).trim();
+    const snippet =
+      (start > 0 ? "…" : "") +
+      escHtml(before) +
+      "<mark>" + escHtml(match) + "</mark>" +
+      escHtml(after) +
+      (end < raw.length ? "…" : "");
+
+    const role = msg.classList.contains("user")
+      ? "You"
+      : msg.classList.contains("assistant")
+        ? "Assistant"
+        : "System";
+
+    hits.push({ el: msg, role, snippet, count });
+  });
+
+  if (!hits.length) {
+    dom.searchResults.innerHTML = '<div class="search-empty">No matches found.</div>';
+    return;
+  }
+
+  dom.searchResults.innerHTML = hits.map((h, i) => `
+    <button class="search-result" data-i="${i}">
+      <span class="search-result-role">${h.role}</span>
+      <span class="search-result-snippet">${h.snippet}</span>
+      ${h.count > 1 ? `<span class="search-result-count">${h.count}×</span>` : ""}
+    </button>
+  `).join("");
+
+  dom.searchResults.querySelectorAll(".search-result").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const hit = hits[Number(btn.dataset.i)];
+      if (hit) jumpToMessage(hit.el);
+    });
+  });
+}
+
+function jumpToMessage(el) {
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  el.classList.add("search-flash");
+  setTimeout(() => el.classList.remove("search-flash"), 1500);
 }
 
 async function loadInfoPanel() {

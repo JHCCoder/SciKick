@@ -12,6 +12,7 @@
     <div id="status-dot" class="status-disconnected" title="Server status"></div>
     <h1 id="project-name">SciKick</h1>
     <button id="btn-info" title="Loaded data">ℹ</button>
+    <button id="btn-search" title="Search conversation">🔍</button>
     <button id="btn-clear" title="Clear chat">—</button>
     <button id="btn-theme" title="Toggle theme">🌙</button>
     <button id="btn-settings" title="LLM Settings">⚙</button>
@@ -74,6 +75,18 @@
     </div>
     <div class="info-body" id="info-body">
       <div class="info-empty">No data loaded. Load a project or scrape a paper to see details here.</div>
+    </div>
+  </div>
+
+  <!-- Search Panel (hidden by default) -->
+  <div id="search-panel" class="hidden">
+    <div class="search-header">
+      <h3>🔍 Search Conversation</h3>
+      <button id="btn-search-close" title="Close">✕</button>
+    </div>
+    <div class="search-body">
+      <input type="text" id="search-input" placeholder="Search the conversation…" autocomplete="off">
+      <div id="search-results"></div>
     </div>
   </div>
 
