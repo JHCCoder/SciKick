@@ -2471,8 +2471,14 @@ async function refreshScanButtonState() {
     const res = await fetch(`${SERVER_URL}/chat/context`);
     if (res.ok) {
       const data = await res.json();
-      kept = (data.loaded_docs || []).some(d => d.file_id === viewingFile.id)
-          || data.manuscript_file_id === viewingFile.id;
+      // "Kept" means the file is in _loaded_docs (full text injected every
+      // turn). The manuscript is auto-loaded as a chunked _current_doc even
+      // when it is NOT kept, so manuscript_file_id alone must not mark it kept
+      // — doing so flipped the button to "Update" and removed the "scan and
+      // keep" action that promotes the manuscript to full text. A kept
+      // manuscript appears in loaded_docs under its file_id, so this single
+      // check still catches it.
+      kept = (data.loaded_docs || []).some(d => d.file_id === viewingFile.id);
     }
   } catch (err) { /* ignore — default to scan mode */ }
   if (kept) {
