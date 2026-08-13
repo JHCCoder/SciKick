@@ -617,6 +617,12 @@ def _get_folder_name_sync(folder_id: str) -> str:
     return service.files().get(fileId=folder_id, fields="name").execute().get("name", "")
 
 
+# Guards the list → update/create in _save_memory_to_drive_sync. A threading.Lock
+# (not asyncio) because the critical section runs inside thread-pool workers via
+# _run_in_thread, and concurrent saves must not interleave the check and the act.
+_MEMORY_FILE_LOCK = threading.Lock()
+
+
 def _save_memory_to_drive_sync(folder_id: str, memory: dict) -> None:
     """Blocking core of :func:`_save_memory_to_drive`. Run via :func:`_run_in_thread`.
 
@@ -638,33 +644,57 @@ def _save_memory_to_drive_sync(folder_id: str, memory: dict) -> None:
     content = json.dumps(memory, indent=2, default=str)
     media = io.BytesIO(content.encode("utf-8"))
 
-    # Check if the memory file already exists
-    response = (
-        service.files()
-        .list(
-            q=f"'{folder_id}' in parents and name = '{MEMORY_FILE_NAME}' and trashed = false",
-            fields="files(id)",
+    # Serialize the check-then-act across worker threads. Without this, two
+    # concurrent saves (periodic flush, /reset, load-context, refresh-context all
+    # write this file) can both list-empty and both create — producing duplicate
+    # .scikick_memory.json files (Drive allows duplicate names). memory_manager's
+    # _memory_lock guards the in-memory state but NOT this Drive write.
+    with _MEMORY_FILE_LOCK:
+        # Find existing copies. Drive does not enforce unique names, so there can
+        # be more than one — request createdTime so we keep the oldest and trash
+        # the rest.
+        response = (
+            service.files()
+            .list(
+                q=f"'{folder_id}' in parents and name = '{MEMORY_FILE_NAME}' and trashed = false",
+                fields="files(id, createdTime)",
+            )
+            .execute()
         )
-        .execute()
-    )
 
-    existing = response.get("files", [])
-    # Simple (non-resumable) upload — the memory file is a tiny JSON blob
-    # (a few KB). Resumable uploads add pointless round-trips/overhead
-    # designed for large media; pointless here.
-    upload = MediaIoBaseUpload(media, mimetype="application/json", resumable=False)
+        existing = sorted(
+            response.get("files", []),
+            key=lambda f: f.get("createdTime", ""),
+        )
+        # Simple (non-resumable) upload — the memory file is a tiny JSON blob
+        # (a few KB). Resumable uploads add pointless round-trips/overhead
+        # designed for large media; pointless here.
+        upload = MediaIoBaseUpload(media, mimetype="application/json", resumable=False)
 
-    if existing:
-        service.files().update(fileId=existing[0]["id"], media_body=upload).execute()
-        logger.info("Updated .scikick_memory.json in Drive folder %s", folder_id)
-    else:
-        file_metadata = {
-            "name": MEMORY_FILE_NAME,
-            "parents": [folder_id],
-            "mimeType": "application/json",
-        }
-        service.files().create(body=file_metadata, media_body=upload).execute()
-        logger.info("Created .scikick_memory.json in Drive folder %s", folder_id)
+        if existing:
+            keep = existing[0]
+            service.files().update(fileId=keep["id"], media_body=upload).execute()
+            logger.info("Updated .scikick_memory.json in Drive folder %s", folder_id)
+
+            # Self-heal duplicates from earlier races: trash every copy after the
+            # one we just kept. Best-effort — a failed trash must not fail the save.
+            for dup in existing[1:]:
+                try:
+                    service.files().delete(fileId=dup["id"]).execute()
+                    logger.info("Trashed duplicate .scikick_memory.json (%s)", dup["id"])
+                except Exception as exc:
+                    logger.warning(
+                        "Could not trash duplicate .scikick_memory.json (%s): %s",
+                        dup["id"], exc,
+                    )
+        else:
+            file_metadata = {
+                "name": MEMORY_FILE_NAME,
+                "parents": [folder_id],
+                "mimeType": "application/json",
+            }
+            service.files().create(body=file_metadata, media_body=upload).execute()
+            logger.info("Created .scikick_memory.json in Drive folder %s", folder_id)
 
 
 async def _save_memory_to_drive(folder_id: str, memory: dict) -> None:
