@@ -595,12 +595,29 @@ async def _run_in_thread(fn, *args, **kwargs):
     )
 
 
-async def _save_memory_to_drive(folder_id: str, memory: dict) -> None:
-    """Save a memory dict as .scikick_memory.json in the Drive folder.
+def _get_folder_name_sync(folder_id: str) -> str:
+    """Fetch a Drive folder's name, service built in-thread.
 
-    Runs blocking Google API calls in a thread pool so the event loop stays
-    responsive for health checks and other requests while the Drive upload
-    is in progress.
+    Run via :func:`_run_in_thread`. Fetches :func:`get_drive_service` inside the
+    worker so the worker uses its own thread-local httplib2.Http instead of
+    sharing the event-loop thread's service — the same cross-thread sharing that
+    corrupted OpenSSL state on the flush path (see the module-header note).
+    """
+    service = get_drive_service()
+    if service is None:
+        raise HTTPException(status_code=401, detail="Not authenticated with Google")
+    return service.files().get(fileId=folder_id, fields="name").execute().get("name", "")
+
+
+def _save_memory_to_drive_sync(folder_id: str, memory: dict) -> None:
+    """Blocking core of :func:`_save_memory_to_drive`. Run via :func:`_run_in_thread`.
+
+    Fetches the Drive service *inside* the worker so the worker gets its own
+    thread-local httplib2.Http (see :func:`get_drive_service`). The list +
+    update/create all run on this one worker, so a flush never shares an
+    Http/SSL connection across threads — sharing one Http between the event-loop
+    thread and the pool workers is what corrupted OpenSSL state and crashed
+    Python (see the crash note in the module header).
     """
     service = get_drive_service()
     if service is None:
@@ -613,14 +630,14 @@ async def _save_memory_to_drive(folder_id: str, memory: dict) -> None:
     content = json.dumps(memory, indent=2, default=str)
     media = io.BytesIO(content.encode("utf-8"))
 
-    # Check if the memory file already exists (run in thread pool)
-    response = await _run_in_thread(
+    # Check if the memory file already exists
+    response = (
         service.files()
         .list(
             q=f"'{folder_id}' in parents and name = '{MEMORY_FILE_NAME}' and trashed = false",
             fields="files(id)",
         )
-        .execute,
+        .execute()
     )
 
     existing = response.get("files", [])
@@ -630,9 +647,7 @@ async def _save_memory_to_drive(folder_id: str, memory: dict) -> None:
     upload = MediaIoBaseUpload(media, mimetype="application/json", resumable=False)
 
     if existing:
-        await _run_in_thread(
-            service.files().update(fileId=existing[0]["id"], media_body=upload).execute,
-        )
+        service.files().update(fileId=existing[0]["id"], media_body=upload).execute()
         logger.info("Updated .scikick_memory.json in Drive folder %s", folder_id)
     else:
         file_metadata = {
@@ -640,10 +655,18 @@ async def _save_memory_to_drive(folder_id: str, memory: dict) -> None:
             "parents": [folder_id],
             "mimeType": "application/json",
         }
-        await _run_in_thread(
-            service.files().create(body=file_metadata, media_body=upload).execute,
-        )
+        service.files().create(body=file_metadata, media_body=upload).execute()
         logger.info("Created .scikick_memory.json in Drive folder %s", folder_id)
+
+
+async def _save_memory_to_drive(folder_id: str, memory: dict) -> None:
+    """Save a memory dict as .scikick_memory.json in the Drive folder.
+
+    Runs the blocking Google API calls in a thread pool so the event loop stays
+    responsive for health checks and other requests while the Drive upload is in
+    progress.
+    """
+    await _run_in_thread(_save_memory_to_drive_sync, folder_id, memory)
 
 
 @router.post("/folder/{folder_id}/memory")
@@ -670,10 +693,6 @@ async def load_context(folder_id: str, force: bool = False):
     Uses file modification times to skip re-processing unchanged files.
     Pass ?force=true to re-download everything regardless.
     """
-    service = get_drive_service()
-    if service is None:
-        raise HTTPException(status_code=401, detail="Not authenticated with Google")
-
     from file_processor import (
         PaperDocument,
         ReviewerComment,
@@ -709,12 +728,10 @@ async def load_context(folder_id: str, force: bool = False):
 
     memory = get_current_memory()
     if memory is None:
-        folder_meta = await _run_in_thread(
-            service.files().get(fileId=folder_id, fields="name").execute
-        )
+        folder_name = await _run_in_thread(_get_folder_name_sync, folder_id)
         memory = create_fresh_memory(
             folder_id=folder_id,
-            folder_name=folder_meta.get("name", ""),
+            folder_name=folder_name,
         )
 
     previous_snapshots = memory.file_snapshots if not force else {}
@@ -1319,10 +1336,6 @@ async def resume_project(folder_id: str):
     """
     import json
 
-    service = get_drive_service()
-    if service is None:
-        raise HTTPException(status_code=401, detail="Not authenticated with Google")
-
     auth_url_hint = (
         f"http://localhost:{PORT}/drive/auth/url"
     )
@@ -1351,15 +1364,13 @@ async def resume_project(folder_id: str):
 
     # 3. Get folder metadata
     try:
-        folder_meta = await _run_in_thread(
-            service.files().get(fileId=folder_id, fields="name").execute
-        )
+        folder_name = await _run_in_thread(_get_folder_name_sync, folder_id)
     except HttpError as exc:
         status = exc.resp.status if exc.resp is not None else None
         if status in (403, 404):
             raise HTTPException(status_code=404, detail=_folder_access_detail())
         raise HTTPException(status_code=502, detail=f"Google Drive error: {exc}")
-    folder_name = folder_meta.get("name", "Project")
+    folder_name = folder_name or "Project"
 
     # 4. If memory exists, restore it into the memory manager
     resume_info = None
