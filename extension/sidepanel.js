@@ -921,18 +921,20 @@ function setChatInput(text) {
 }
 
 // Whether the chat input, send, and scan controls are interactive.
-// Disabled when the server is down OR an LLM response is streaming —
-// mirrors ChatGPT, where you can't queue another message mid-generation.
+// The chatbox stays writable whenever the server is up — even mid-stream or
+// mid-context-operation — so the user can draft the next message. Only send
+// and the context-mutating controls lock while a response streams or a
+// context operation is in flight, so a message can't race the operation.
 // Centralized so the 5s health poll can't re-enable input mid-stream.
 function applyInputState() {
-  const enabled = serverConnected && !generating && !contextUpdating;
-  dom.chatInput.disabled = !enabled;
-  dom.btnSend.disabled = !enabled;
+  dom.chatInput.disabled = !serverConnected;
+  const canSend = serverConnected && !generating && !contextUpdating;
+  dom.btnSend.disabled = !canSend;
   // Every context-mutating action locks whenever the chat is (server down,
   // streaming, or a context operation in flight) so two can't race.
-  dom.btnScanTab.disabled = !enabled;
-  dom.btnUseTab.disabled = !enabled;
-  dom.btnLoad.disabled = !enabled;
+  dom.btnScanTab.disabled = !canSend;
+  dom.btnUseTab.disabled = !canSend;
+  dom.btnLoad.disabled = !canSend;
 }
 
 // Show/hide the stop button to reflect whether a response is streaming,
