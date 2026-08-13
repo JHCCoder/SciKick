@@ -3,7 +3,7 @@
   "name": "SciKick",
   "version": "0.3.1",
   "description": "Your AI research sidekick. Accelerate scientific writing and discovery with context-aware AI.",
-  "permissions": ["sidePanel", "storage", "tabs", "scripting"],
+  "permissions": ["sidePanel", "storage", "tabs", "scripting", "clipboardWrite"],
   "host_permissions": ["http://localhost:8742/*", "<all_urls>"],
   "side_panel": {
     "default_path": "sidepanel.html"

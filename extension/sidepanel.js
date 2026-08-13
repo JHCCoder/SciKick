@@ -1128,11 +1128,12 @@ function addMessage(role, content, returnBubble = false) {
     // Simple markdown render for system messages
     bubble.innerHTML = renderMarkdown(content);
   } else if (role === "user") {
-    bubble.textContent = content;
+    renderUserMessage(bubble, content);
   }
   // For assistant, content is rendered via renderAssistantMessage
 
   wrapper.appendChild(bubble);
+  if (role === "assistant") addCopyButton(wrapper, bubble);
   dom.messages.appendChild(wrapper);
   scrollToBottom();
 
@@ -1140,9 +1141,161 @@ function addMessage(role, content, returnBubble = false) {
   return null;
 }
 
+// User messages are shown as literal text (not markdown). Newlines are
+// preserved via white-space:pre-wrap so pasted lists/paragraphs keep their
+// shape in the transcript instead of collapsing into one wall of text. A
+// message longer than USER_MESSAGE_COLLAPSE_WORDS words is collapsed to a
+// preview with a click-to-expand toggle; the full text stays on the bubble as
+// data-full-text so pin and search still see the complete message.
+const USER_MESSAGE_COLLAPSE_WORDS = 100;
+
+function countWords(text) {
+  const t = (text || "").trim();
+  return t ? t.split(/\s+/).length : 0;
+}
+
+function previewWords(text, n) {
+  return (text || "").trim().split(/\s+/).slice(0, n).join(" ");
+}
+
+function renderUserMessage(bubble, content) {
+  bubble.classList.add("user-text");
+  bubble.dataset.fullText = content;
+
+  if (countWords(content) <= USER_MESSAGE_COLLAPSE_WORDS) {
+    bubble.textContent = content;
+    return;
+  }
+
+  setUserBubbleCollapsed(bubble, true);
+  // Clicking a collapsed message expands it (the toggle button also works);
+  // once expanded only the "Show less" button collapses it, so selecting or
+  // copying the full text can't accidentally fold it back up.
+  bubble.addEventListener("click", (e) => {
+    if (e.target.closest(".user-text-toggle")) return;
+    if (bubble.classList.contains("is-collapsed")) setUserBubbleCollapsed(bubble, false);
+  });
+}
+
+function setUserBubbleCollapsed(bubble, collapsed) {
+  const content = bubble.dataset.fullText || "";
+  bubble.classList.toggle("is-collapsed", collapsed);
+  bubble.replaceChildren();
+
+  if (collapsed) {
+    const preview = document.createElement("span");
+    preview.className = "user-text-preview";
+    preview.textContent = previewWords(content, USER_MESSAGE_COLLAPSE_WORDS) + " …";
+    bubble.append(preview, " ", makeUserTextToggle("Show full message"));
+  } else {
+    bubble.append(document.createTextNode(content), " ", makeUserTextToggle("Show less"));
+  }
+}
+
+function makeUserTextToggle(label) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "user-text-toggle";
+  btn.textContent = label;
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const bubble = btn.closest(".message-content");
+    if (bubble) setUserBubbleCollapsed(bubble, !bubble.classList.contains("is-collapsed"));
+  });
+  return btn;
+}
+
+// Full text of a message, preferring the stashed copy for user messages so a
+// collapsed long message still pins/searches with its complete content.
+function messageFullText(msg) {
+  const bubble = msg.querySelector(".message-content");
+  return (bubble && bubble.dataset.fullText) || msg.textContent || "";
+}
+
 function renderAssistantMessage(bubble, content) {
   bubble.innerHTML = renderMarkdown(content);
   scrollToBottom();
+}
+
+// --- Copy assistant reply with formatting ---
+
+// The rendered reply uses theme colors (accent <strong>, tinted <code>/<pre>
+// blocks) that a plain-text copy drops. To keep those, we clone the bubble,
+// inline each element's computed color/background/font, and put BOTH the styled
+// HTML and the plain text on the clipboard — a rich-text target (Docs, Word,
+// email) keeps the look, a plain-text target still gets the words.
+const COPY_STYLE_PROPS = [
+  "color", "background-color", "font-weight", "font-style", "font-family", "font-size",
+];
+
+function htmlWithInlineStyles(el) {
+  const clone = el.cloneNode(true);
+  const src = [el, ...el.querySelectorAll("*")];
+  const dst = [clone, ...clone.querySelectorAll("*")];
+  src.forEach((node, i) => {
+    const target = dst[i];
+    if (!target || target.nodeType !== 1) return; // skip non-element nodes
+    const cs = getComputedStyle(node);
+    target.setAttribute(
+      "style",
+      COPY_STYLE_PROPS.map((p) => `${p}:${cs.getPropertyValue(p)}`).join(";")
+    );
+  });
+  return clone.outerHTML;
+}
+
+async function copyRichText(bubble) {
+  const html = htmlWithInlineStyles(bubble);
+  try {
+    // One clipboard version: styled HTML, so the pasted reply keeps its
+    // background/colors. (Manual select-and-copy is handled separately below
+    // and stays raw.)
+    await navigator.clipboard.write([
+      new ClipboardItem({
+        "text/html": new Blob([html], { type: "text/html" }),
+      }),
+    ]);
+    return true;
+  } catch (e) {
+    // ClipboardItem can be unsupported in some contexts — fall back to plain
+    // text so the copy still works.
+    try {
+      await navigator.clipboard.writeText(bubble.innerText || "");
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+}
+
+// Manual select-and-copy inside the transcript is RAW text only. The browser
+// would otherwise also copy the styled HTML (with theme colors), so a pasted
+// snippet into a plain app would carry stray formatting. The ⧉ button is the
+// one place that copies WITH formatting.
+document.addEventListener("copy", (e) => {
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed) return;
+  const range = sel.getRangeAt(0);
+  if (!dom.messages.contains(range.commonAncestorContainer)) return;
+  const text = sel.toString();
+  if (!text) return;
+  e.preventDefault();
+  e.clipboardData.setData("text/plain", text);
+});
+
+function addCopyButton(wrapper, bubble) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "msg-copy";
+  btn.title = "Copy with formatting";
+  btn.setAttribute("aria-label", "Copy with formatting");
+  btn.textContent = "⧉";
+  btn.addEventListener("click", async () => {
+    const ok = await copyRichText(bubble);
+    btn.textContent = ok ? "✓" : "⚠";
+    setTimeout(() => { btn.textContent = "⧉"; }, 1200);
+  });
+  wrapper.appendChild(btn);
 }
 
 function showSystemMessage(content) {
@@ -1607,7 +1760,7 @@ function runSearch() {
   const hits = [];
 
   messages.forEach((msg) => {
-    const raw = msg.textContent || "";
+    const raw = messageFullText(msg);
     const lower = raw.toLowerCase();
     const rawIdx = lower.indexOf(q);
     if (rawIdx === -1) return;
@@ -1695,7 +1848,7 @@ function messageRole(el) {
 
 function pinMessage(el) {
   if (pins.some((p) => p.el === el)) return;
-  const text = (el.textContent || "").trim();
+  const text = messageFullText(el).trim();
   if (!text) return;
   pins.push({ el, role: messageRole(el), text });
   renderPinPanel();

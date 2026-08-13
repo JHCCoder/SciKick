@@ -1019,6 +1019,32 @@ body {
   max-width: 85%;
 }
 
+/* User messages are literal text: preserve newlines so pasted lists and
+   paragraphs keep their shape in the transcript. */
+.message.user .message-content.user-text {
+  white-space: pre-wrap;
+  text-align: left;
+}
+
+/* Collapsed long user message: preview is click-to-expand. */
+.message.user .message-content.user-text.is-collapsed {
+  cursor: pointer;
+}
+.user-text-toggle {
+  display: inline-block;
+  margin-top: 8px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.user-text-toggle:hover {
+  text-decoration: underline;
+}
+
 .message.assistant .message-content {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
@@ -1059,6 +1085,28 @@ body {
 }
 
 .message-content strong { color: var(--accent); }
+
+/* Copy-with-formatting action on assistant messages (revealed on hover). */
+.msg-copy {
+  align-self: center;
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1;
+  padding: 5px 6px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+.message:hover .msg-copy { opacity: 1; pointer-events: auto; }
+.msg-copy:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
 
 /* --- Onboarding buttons --- */
 .onboarding-buttons {
