@@ -82,6 +82,19 @@ class GoalState(BaseModel):
     target_info_url: str = ""
 
 
+# Goal modes that target a manuscript (main paper) in the project folder.
+# Only these trigger the manuscript auto-detection / chunked `_current_doc`
+# treatment on Load Project. Non-paper goals (application, grant,
+# brainstorming, other) treat the folder's files generically and never
+# auto-promote a manuscript.
+PAPER_GOAL_MODES = ("paper_revision", "paper_writing", "paper_discussion")
+
+
+def is_paper_goal_mode(mode: str) -> bool:
+    """True if a goal mode targets a manuscript (paper writing/revision/discussion)."""
+    return (mode or "") in PAPER_GOAL_MODES
+
+
 class RevisionMemory(BaseModel):
     project_id: str = ""
     project_folder_id: str = ""  # Google Drive folder ID

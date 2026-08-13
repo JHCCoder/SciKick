@@ -1798,6 +1798,29 @@ async def _sync_goal_to_drive(memory) -> None:
         logger.warning("Goal Drive sync failed (non-fatal): %s", exc)
 
 
+async def _resync_manuscript_after_goal(memory) -> None:
+    """Re-run Load Project after a goal is set/changed so manuscript handling
+    matches the new goal.
+
+    The goal is chosen via onboarding AFTER the initial load, so a fresh
+    project loads manuscript-less; picking a paper goal must then backfill the
+    manuscript, and switching a paper goal to application/grant/brainstorm/other
+    must drop a previously auto-loaded manuscript. `force=True` is required:
+    the goal lives in the memory file, which change-detection skips, so a plain
+    reload would short-circuit as "unchanged" even though the manuscript
+    presence changed.
+    """
+    folder_id = memory.project_folder_id if memory else ""
+    if not folder_id:
+        return
+    try:
+        from drive_sync import load_context
+
+        await load_context(folder_id, force=True)
+    except Exception as exc:
+        logger.warning("Manuscript resync after goal change failed (non-fatal): %s", exc)
+
+
 def _goal_lookup_kind_name(goal: GoalState) -> Optional[tuple[str, str]]:
     """Return (kind, name) to look up for this goal, or None if no lookup
     applies (brainstorming / paper_discussion / other, or a missing target)."""
@@ -1881,8 +1904,11 @@ async def _finalize_goal() -> str:
     _save_local(memory)
     recap = goal_recap_text(memory.goal)
 
-    # Best-effort, non-blocking Drive sync.
+    # Best-effort, non-blocking Drive sync + manuscript re-sync. The latter
+    # re-runs Load Project so a paper goal backfills the manuscript (and a
+    # non-paper goal drops one) — see _resync_manuscript_after_goal.
     _fire_and_forget(_sync_goal_to_drive(memory))
+    _fire_and_forget(_resync_manuscript_after_goal(memory))
 
     _goal_onboarding = False
     _awaiting_goal_field = ""

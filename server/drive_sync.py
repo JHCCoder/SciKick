@@ -762,6 +762,7 @@ async def load_context(folder_id: str, force: bool = False):
         set_current_memory,
         _save_local,
         goal_payload,
+        is_paper_goal_mode,
     )
 
     memory = get_current_memory()
@@ -862,14 +863,19 @@ async def load_context(folder_id: str, force: bool = False):
     if force or new_ids or changed_ids:
         _focused_file_cache.clear()
 
-    # 4. Find the manuscript. A clear manuscript is parsed and promoted to
-    # _current_doc as before — but if none is detected we no longer abort the
-    # load. The folder is still examined: comments, images, supporting/supplement
-    # docs, the file index, and the project summary all run with doc=None, and
-    # the response carries manuscript: null. This makes a missing manuscript a
-    # normal state (empty folder, or a non-manuscript mode like grant/brainstorm)
-    # instead of an error.
-    manuscript_file = _find_manuscript(all_files)
+    # 4. Find the manuscript — but ONLY for a paper-related goal. A project the
+    # user has framed as an application / grant / brainstorm / "other" has no
+    # main paper to auto-load: searching for one would misfile a cover letter,
+    # résumé, or proposal as "the manuscript" and promote it to _current_doc.
+    # On a fresh load the goal isn't chosen yet (onboarding runs AFTER this), so
+    # a goal-less project also starts manuscript-less; selecting a paper goal
+    # fires a force reload that fills the manuscript in. A clear manuscript is
+    # parsed and promoted to _current_doc as before — but if none is detected we
+    # no longer abort the load. The folder is still examined: comments, images,
+    # supporting/supplement docs, the file index, and the project summary all
+    # run with doc=None, and the response carries manuscript: null.
+    paper_goal = bool(memory.goal and is_paper_goal_mode(memory.goal.mode))
+    manuscript_file = _find_manuscript(all_files) if paper_goal else None
     doc: Optional[PaperDocument] = None
     ms_id = manuscript_file["id"] if manuscript_file else None
     name = manuscript_file["name"] if manuscript_file else (memory.project_folder_name or "Project")
