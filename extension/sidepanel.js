@@ -55,6 +55,8 @@ let bgPort = null; // Port to background service worker (keep-alive only)
 let thinkingMode = "auto"; // "auto" | "on" | "off" — DeepSeek v4 chain-of-thought
 let currentProvider = null; // last known provider/model — sent with the thinking toggle
 let currentModel = null; //  so /chat/configure keeps the runtime overrides intact
+let serverVersion = null; // version reported by /health ("" if unknown)
+let dismissedServerVersion = null; // server version the user dismissed the out-of-date banner for
 
 // ---------------------------------------------------------------------------
 // DOM Elements
@@ -81,6 +83,11 @@ const dom = {
   btnConnect: $("#btn-connect"),
   firstrunInstall: $("#firstrun-install"),
   firstrunReconnect: $("#firstrun-reconnect"),
+  // Backend out-of-date banner
+  versionBanner: $("#version-banner"),
+  versionServer: $("#version-server"),
+  versionExpected: $("#version-expected"),
+  btnVersionDismiss: $("#btn-version-dismiss"),
   // Drive setup banner
   driveSetupBanner: $("#drive-setup-banner"),
   btnDriveConnect: $("#btn-drive-connect"),
@@ -147,7 +154,9 @@ async function checkServerHealth() {
       const data = await res.json();
       if (data.status === "ok") {
         healthFailCount = 0;
+        serverVersion = data.version || null;
         setServerStatus("connected");
+        updateVersionBanner();
         return true;
       }
     }
@@ -163,6 +172,45 @@ async function checkServerHealth() {
     setServerStatus("disconnected");
   }
   return false;
+}
+
+// --- Backend version-mismatch nudge ---------------------------------------
+
+// Compare two dotted semver strings. Returns -1 (a<b), 0 (equal), or 1 (a>b).
+// Missing segments are treated as 0, so "0.3" === "0.3.0".
+function compareVersions(a, b) {
+  const pa = String(a || "").split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = String(b || "").split(".").map((n) => parseInt(n, 10) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const x = pa[i] || 0;
+    const y = pb[i] || 0;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+function extensionVersion() {
+  try {
+    return chrome.runtime.getManifest().version;
+  } catch (e) {
+    return "0.0.0";
+  }
+}
+
+// Show the "backend is out of date" banner when the /health version is older
+// than this panel's manifest version. Hidden when the server is current, ahead,
+// versionless, or when the user has already dismissed this exact server version.
+function updateVersionBanner() {
+  const extVer = extensionVersion();
+  const behind = serverVersion && compareVersions(serverVersion, extVer) < 0;
+  if (behind && dismissedServerVersion !== serverVersion) {
+    dom.versionServer.textContent = `v${serverVersion}`;
+    dom.versionExpected.textContent = `v${extVer}`;
+    dom.versionBanner.style.display = "block";
+  } else {
+    dom.versionBanner.style.display = "none";
+  }
 }
 
 function setServerStatus(status) {
@@ -208,6 +256,9 @@ function setServerStatus(status) {
     }
   } else {
     dom.connectBanner.style.display = "block";
+    // No (reachable) server — no version to compare against; hide the nudge.
+    serverVersion = null;
+    dom.versionBanner.style.display = "none";
     // First-run (never connected): show clone + ./start.sh. Otherwise the
     // shorter reconnect hint (background service / Desktop-Documents caveat).
     dom.firstrunInstall.classList.toggle("hidden", everConnected);
@@ -2762,12 +2813,21 @@ async function init() {
     });
   });
 
+  // Dismiss the backend out-of-date banner for this server version (persisted
+  // so it stays gone across panel reopens; re-shows only if the version shifts).
+  dom.btnVersionDismiss.addEventListener("click", () => {
+    dismissedServerVersion = serverVersion;
+    chrome.storage.local.set({ dismissedServerVersion });
+    updateVersionBanner();
+  });
+
   // Load saved settings
-  const stored = await chrome.storage.local.get(["driveFolderId", "theme", "everConnected"]);
+  const stored = await chrome.storage.local.get(["driveFolderId", "theme", "everConnected", "dismissedServerVersion"]);
   if (stored.driveFolderId) {
     dom.driveInput.value = stored.driveFolderId;
   }
   everConnected = !!stored.everConnected;
+  dismissedServerVersion = stored.dismissedServerVersion || null;
 
   // Apply saved theme (before first paint — but we're already in init)
   loadTheme();

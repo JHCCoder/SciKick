@@ -140,6 +140,21 @@
     <button id="btn-connect" class="btn-primary">⟳ Retry Connection</button>
   </div>
 
+  <!-- Backend version mismatch (server reachable but older than this panel
+       expects — e.g. the extension auto-updated but the local server hasn't). -->
+  <div id="version-banner" class="banner version-banner" style="display: none;">
+    <p><strong>⚠️ Backend is out of date</strong></p>
+    <p>Your local SciKick server is on <span id="version-server">–</span>, but this
+      panel expects <span id="version-expected">–</span> or newer. Update it so
+      everything keeps working:</p>
+    <div class="startup-command">
+      <code class="cmd-text">cd SciKick && git pull && ./start.sh</code>
+      <button class="btn-copy-cmd" title="Copy command">📋</button>
+    </div>
+    <p class="hint">If you didn't install with git, re-download the latest SciKick folder instead.</p>
+    <button id="btn-version-dismiss" class="btn-secondary">Dismiss</button>
+  </div>
+
   <!-- Project Selector -->
   <div id="project-bar" class="hidden">
     <input type="text" id="drive-folder-input"

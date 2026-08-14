@@ -93,8 +93,13 @@ app.add_middleware(
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint — verifies the server is running."""
-    return {"status": "ok", "version": "0.3.1"}
+    """Health check endpoint — verifies the server is running.
+
+    Reports ``app.version`` (the single source of truth, set above) so the
+    side panel can compare it against its own version and nudge the user to
+    update the local backend when it falls behind.
+    """
+    return {"status": "ok", "version": app.version}
 
 
 @app.post("/server/restart")

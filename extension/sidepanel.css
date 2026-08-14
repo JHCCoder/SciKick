@@ -231,6 +231,9 @@ body {
   color: var(--text-secondary);
   margin-top: 6px;
 }
+.version-banner .btn-secondary {
+  margin-top: 4px;
+}
 .ds-actions {
   display: flex;
   gap: 8px;
@@ -923,6 +926,17 @@ body {
 }
 .btn-primary:hover { background: var(--accent-hover); }
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-secondary {
+  padding: 6px 12px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn-secondary:hover { background: var(--bg-tertiary); color: var(--text-primary); }
 
 /* --- Current Tab Bar --- */
 #current-tab-bar {
