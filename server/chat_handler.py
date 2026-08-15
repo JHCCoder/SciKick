@@ -2319,12 +2319,12 @@ _PROVIDER_MODELS: dict[str, str] = {
     "anthropic":  "claude-opus-5, claude-sonnet-5, claude-haiku-4-5, claude-fable-5",
     "deepseek":   "deepseek-v4-pro, deepseek-v4-flash",
     "glm":        "glm-5.2, glm-5, glm-5.1, glm-4.7, glm-4.6, glm-4-long, glm-4.5-air",
-    "openai":     "gpt-5, gpt-5.1, gpt-5.2, gpt-5.3, gpt-4.1, gpt-4o",
+    "openai":     "gpt-5, gpt-5.1, gpt-5.2, gpt-5.3, gpt-5.4, gpt-4.1, gpt-4o",
     "gemini":     "gemini-3.5-flash, gemini-3-pro, gemini-3.1-pro, gemini-2.5-flash, gemini-2.5-pro",
     "kimi":       "kimi-k3, kimi-k2.7-code, kimi-k2.6, kimi-k2.5",
-    "grok":       "grok-4.5, grok-4.3, grok-4.20, grok-4.1-fast",
+    "grok":       "grok-4.6, grok-4.5, grok-4.3, grok-4.20, grok-4.1-fast",
     "minimax":    "MiniMax-M3, MiniMax-M2.7, MiniMax-M2.5, MiniMax-M2.1",
-    "qwen":       "qwen3-max, qwen3.5-plus, qwen3.5-flash, qwen-plus, qwen-flash",
+    "qwen":       "qwen3.7-max, qwen3.7-plus, qwen3.7-flash, qwen3.6-plus, qwen3.6-flash, qwen3.5-plus, qwen3.5-flash, qwen3-max",
     # Local runtimes — model names depend on what the user has loaded.
     "local-ollama":   "llama3.1, qwen2.5, deepseek-r1 (whatever you `ollama pull`ed)",
     "local-lmstudio": "whatever model is loaded in the LM Studio GUI",
@@ -2435,9 +2435,10 @@ _PROVIDER_EXTRA_HEADERS: dict[str, dict[str, str]] = {
 _MODEL_THINKING_FAMILY: dict[str, str] = {
     # deepseek (v4 defaults to thinking on)
     "deepseek-v4-pro": "deepseek", "deepseek-v4-flash": "deepseek",
-    # qwen — all 5 toggle via enable_thinking
+    # qwen — hybrid 3.x models toggle via enable_thinking
     "qwen3-max": "qwen", "qwen3.5-plus": "qwen", "qwen3.5-flash": "qwen",
-    "qwen-plus": "qwen", "qwen-flash": "qwen",
+    "qwen3.6-plus": "qwen", "qwen3.6-flash": "qwen",
+    "qwen3.7-max": "qwen", "qwen3.7-plus": "qwen", "qwen3.7-flash": "qwen",
     # glm — glm-4-long is never-off, excluded
     "glm-5.2": "glm", "glm-5": "glm", "glm-5.1": "glm", "glm-4.7": "glm", "glm-4.6": "glm",
     "glm-4.5-air": "glm",
@@ -2446,10 +2447,10 @@ _MODEL_THINKING_FAMILY: dict[str, str] = {
     # openai — gpt-5 (minimal only) and gpt-4.x excluded; gpt-5.3 pending verify.
     # gpt-5.x omitting reasoning_effort defaults to NO reasoning (like qwen), so
     # the family has an explicit "on" shape (medium) — see _THINKING_PARAMS.
-    "gpt-5.1": "openai", "gpt-5.2": "openai",
+    "gpt-5.1": "openai", "gpt-5.2": "openai", "gpt-5.4": "openai",
     # minimax — only M3; M2.x always think
     "MiniMax-M3": "minimax",
-    # grok — only 4.3; 4.5 always-on, 4.20/4.1-fast are separate model IDs
+    # grok — only 4.3; 4.5/4.6 always-on, 4.20/4.1-fast are separate model IDs
     "grok-4.3": "grok",
     # NOTE: Gemini (2.5-flash etc.) is deliberately NOT here — its OpenAI-
     # compatible endpoint REJECTS the thinkingBudget field ("Unknown name
@@ -3398,11 +3399,12 @@ MODEL_CONTEXT_WINDOWS = {
     "glm-4.6": 200000,
     "glm-4-long": 1048576,
     "glm-4.5-air": 131072,
-    # openai — GPT-5 family: 400K; 4.1: 1M; 4o: 128K
+    # openai — GPT-5.4: 1M; GPT-5/5.1/5.2/5.3: 400K; 4.1: 1M; 4o: 128K
     "gpt-5": 400000,
     "gpt-5.1": 400000,
     "gpt-5.2": 400000,
     "gpt-5.3": 400000,
+    "gpt-5.4": 1048576,
     "gpt-4.1": 1048576,
     "gpt-4o": 128000,
     # gemini — 3.x and 2.5: 1M
@@ -3416,7 +3418,8 @@ MODEL_CONTEXT_WINDOWS = {
     "kimi-k2.7-code": 262144,
     "kimi-k2.6": 262144,
     "kimi-k2.5": 262144,
-    # grok — 4.5: 500K; 4.3: 1M; 4.20/4.1-fast: 2M
+    # grok — 4.6/4.5: 500K; 4.3: 1M; 4.20/4.1-fast: 2M
+    "grok-4.6": 524288,
     "grok-4.5": 524288,
     "grok-4.3": 1048576,
     "grok-4.20": 2097152,
@@ -3426,12 +3429,15 @@ MODEL_CONTEXT_WINDOWS = {
     "MiniMax-M2.7": 204800,
     "MiniMax-M2.5": 204800,
     "MiniMax-M2.1": 204800,
-    # qwen — qwen3-max: 256K; 3.5-plus/plus/flash: 1M
+    # qwen — qwen3-max: 256K; 3.5/3.6/3.7 plus/flash/max: 1M
     "qwen3-max": 262144,
     "qwen3.5-plus": 1048576,
     "qwen3.5-flash": 1048576,
-    "qwen-plus": 1048576,
-    "qwen-flash": 1048576,
+    "qwen3.6-plus": 1048576,
+    "qwen3.6-flash": 1048576,
+    "qwen3.7-max": 1048576,
+    "qwen3.7-plus": 1048576,
+    "qwen3.7-flash": 1048576,
 }
 
 
