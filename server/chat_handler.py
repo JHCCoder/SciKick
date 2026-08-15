@@ -4165,3 +4165,54 @@ async def scrape_webpage(req: ScrapeRequest):
         "section_count": len(doc.sections),
         "scraped_count": len(_scraped_docs),
     }
+
+
+class ScrapeFileRequest(BaseModel):
+    path: str  # file:// URL (or absolute local path) to a PDF on this machine
+
+
+@router.post("/scrape-file")
+async def scrape_local_file(req: ScrapeFileRequest):
+    """Load a local PDF (opened in Chrome as ``file://``) into chat context.
+
+    Chrome's PDF viewer renders the PDF through a plugin and doesn't expose its
+    text as DOM, so the normal HTML scrape sees only an empty viewer shell —
+    and the extension can't ``fetch`` ``file://`` bytes. The server runs on the
+    same machine, so it opens the file directly and parses it with the standard
+    PDF pipeline (incl. figure OCR), matching "scan and keep".
+    """
+    from pathlib import Path
+    from urllib.parse import unquote
+
+    raw = (req.path or "").strip()
+    if raw.lower().startswith("file://"):
+        raw = unquote(raw[len("file://"):])
+    path = Path(raw).expanduser()
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    if path.suffix.lower() != ".pdf":
+        raise HTTPException(status_code=400, detail="Only PDF files can be loaded this way.")
+
+    from file_processor import parse_pdf
+
+    try:
+        data = path.read_bytes()
+        doc = parse_pdf(data, path.name, figure_ocr=True)
+    except Exception as exc:
+        logger.error("Scrape-file: failed to parse %s: %s", path, exc)
+        raise HTTPException(status_code=500, detail=f"Failed to parse PDF: {exc}")
+
+    global _scraped_docs, _scraped_sources
+    _scraped_docs.append(doc)
+    _scraped_sources.append(f"file://{path}")
+
+    return {
+        "status": "scraped",
+        "url": f"file://{path}",
+        "title": doc.title,
+        "abstract_length": len(doc.abstract),
+        "full_text_length": len(doc.full_text),
+        "sections": [s.heading for s in doc.sections],
+        "section_count": len(doc.sections),
+        "scraped_count": len(_scraped_docs),
+    }

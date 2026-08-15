@@ -2707,36 +2707,52 @@ function initTabBar() {
         const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
         if (!tab || !tab.id) throw new Error("No active tab found");
 
-        // chrome.scripting requires the "scripting" permission (in
-        // manifest.json) plus host access to the tab's URL.
-        let pageHtml = "";
-        try {
-          const results = await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            func: () => document.documentElement.outerHTML,
+        // Local PDF opened as file:// — Chrome's PDF viewer renders it through
+        // a plugin and doesn't expose the text as DOM, so the HTML scrape below
+        // would only read an empty viewer shell. The server runs on this same
+        // machine, so hand it the file:// path and let it read the PDF directly.
+        const isLocalPdf = /^file:\/\//i.test(scrapeUrl);
+
+        let res;
+        if (isLocalPdf) {
+          res = await fetch(`${SERVER_URL}/chat/scrape-file`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: scrapeUrl }),
+            signal: currentStream.signal,
           });
-          pageHtml = results[0]?.result || "";
-        } catch (scriptErr) {
-          throw new Error(
-            `Cannot read page content. If you just changed the manifest, ` +
-            `reload SciKick (chrome://extensions → ↻).\n\n` +
-            `Details: ${scriptErr.message}`
-          );
-        }
+        } else {
+          // chrome.scripting requires the "scripting" permission (in
+          // manifest.json) plus host access to the tab's URL.
+          let pageHtml = "";
+          try {
+            const results = await chrome.scripting.executeScript({
+              target: { tabId: tab.id },
+              func: () => document.documentElement.outerHTML,
+            });
+            pageHtml = results[0]?.result || "";
+          } catch (scriptErr) {
+            throw new Error(
+              `Cannot read page content. If you just changed the manifest, ` +
+              `reload SciKick (chrome://extensions → ↻).\n\n` +
+              `Details: ${scriptErr.message}`
+            );
+          }
 
-        if (!pageHtml || pageHtml.length < 500) {
-          throw new Error("Page content is empty or too short — the page may not have finished loading.");
-        }
-        // executeScript isn't abortable, so if ✕ was hit while it ran, bail
-        // out here before sending the scrape.
-        if (currentStream.signal.aborted) throw new DOMException("aborted", "AbortError");
+          if (!pageHtml || pageHtml.length < 500) {
+            throw new Error("Page content is empty or too short — the page may not have finished loading.");
+          }
+          // executeScript isn't abortable, so if ✕ was hit while it ran, bail
+          // out here before sending the scrape.
+          if (currentStream.signal.aborted) throw new DOMException("aborted", "AbortError");
 
-        const res = await fetch(`${SERVER_URL}/chat/scrape`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url: scrapeUrl, html: pageHtml }),
-          signal: currentStream.signal,
-        });
+          res = await fetch(`${SERVER_URL}/chat/scrape`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url: scrapeUrl, html: pageHtml }),
+            signal: currentStream.signal,
+          });
+        }
 
         if (!res.ok) {
           const err = await res.json().catch(() => ({ detail: res.statusText }));
