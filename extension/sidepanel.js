@@ -2712,6 +2712,7 @@ function initTabBar() {
         // would only read an empty viewer shell. The server runs on this same
         // machine, so hand it the file:// path and let it read the PDF directly.
         const isLocalPdf = /^file:\/\//i.test(scrapeUrl);
+        const isRemotePdf = !isLocalPdf && /\.pdf(?:[?#]|$)/i.test(scrapeUrl);
 
         let res;
         if (isLocalPdf) {
@@ -2719,6 +2720,17 @@ function initTabBar() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ path: scrapeUrl }),
+            signal: currentStream.signal,
+          });
+        } else if (isRemotePdf) {
+          // Remote PDF (e.g. biorxiv `.full.pdf`, arXiv `/pdf/...`). Chrome
+          // renders these in its built-in viewer, so the DOM is an empty shell
+          // — same as the file:// case. Hand the URL to the server, which
+          // downloads the bytes and runs the normal PDF pipeline.
+          res = await fetch(`${SERVER_URL}/chat/scrape-pdf`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url: scrapeUrl }),
             signal: currentStream.signal,
           });
         } else {

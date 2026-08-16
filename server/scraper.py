@@ -68,6 +68,23 @@ async def fetch_page(url: str, timeout: int = 30) -> str:
         return response.text
 
 
+async def fetch_bytes(url: str, timeout: int = 60) -> bytes:
+    """Fetch a URL and return its raw bytes (e.g. a PDF document)."""
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/pdf,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive",
+        "DNT": "1",
+    }
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+        response = await client.get(url, headers=headers)
+        response.raise_for_status()
+        return response.content
+
+
 # ---------------------------------------------------------------------------
 # Extract
 # ---------------------------------------------------------------------------

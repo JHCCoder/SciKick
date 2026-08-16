@@ -4216,3 +4216,63 @@ async def scrape_local_file(req: ScrapeFileRequest):
         "section_count": len(doc.sections),
         "scraped_count": len(_scraped_docs),
     }
+
+
+class ScrapePdfRequest(BaseModel):
+    url: str  # remote http(s) URL to a PDF (e.g. biorxiv `.full.pdf`)
+
+
+@router.post("/scrape-pdf")
+async def scrape_remote_pdf(req: ScrapePdfRequest):
+    """Load a remote PDF (e.g. a biorxiv/arXiv ``.full.pdf``) into context.
+
+    Chrome renders remote PDFs in its built-in viewer, which doesn't expose
+    text as DOM — the same reason ``file://`` PDFs need the /scrape-file
+    side-channel. The server fetches the PDF bytes and runs them through the
+    standard PDF pipeline (incl. figure OCR). Only works for openly accessible
+    PDFs (preprint servers); paywalled PDFs should go via Google Drive.
+    """
+    from urllib.parse import urlparse
+
+    from scraper import fetch_bytes
+    from file_processor import parse_pdf
+
+    url = (req.url or "").strip()
+    if not url.lower().startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="A remote http(s) URL is required.")
+
+    # Derive a filename for the parser (title fallback + logging).
+    path = urlparse(url).path
+    name = path.rsplit("/", 1)[-1] or "paper.pdf"
+    if not name.lower().endswith(".pdf"):
+        name += ".pdf"
+
+    try:
+        data = await fetch_bytes(url)
+    except Exception as exc:
+        logger.error("Scrape-pdf: failed to download %s: %s", url, exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not download the PDF: {exc}",
+        )
+
+    try:
+        doc = await asyncio.to_thread(parse_pdf, data, name, figure_ocr=True)
+    except Exception as exc:
+        logger.error("Scrape-pdf: failed to parse %s: %s", url, exc)
+        raise HTTPException(status_code=500, detail=f"Failed to parse PDF: {exc}")
+
+    global _scraped_docs, _scraped_sources
+    _scraped_docs.append(doc)
+    _scraped_sources.append(url)
+
+    return {
+        "status": "scraped",
+        "url": url,
+        "title": doc.title,
+        "abstract_length": len(doc.abstract),
+        "full_text_length": len(doc.full_text),
+        "sections": [s.heading for s in doc.sections],
+        "section_count": len(doc.sections),
+        "scraped_count": len(_scraped_docs),
+    }
