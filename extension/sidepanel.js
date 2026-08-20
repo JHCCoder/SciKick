@@ -73,6 +73,7 @@ const dom = {
   driveInput: $("#drive-folder-input"),
   btnLoad: $("#btn-load-project"),
   messages: $("#messages"),
+  btnJumpLatest: $("#btn-jump-latest"),
   contextHint: $("#context-hint"),
   chatInput: $("#chat-input"),
   btnSend: $("#btn-send"),
@@ -1186,7 +1187,10 @@ function addMessage(role, content, returnBubble = false) {
   wrapper.appendChild(bubble);
   if (role === "assistant") addCopyButton(wrapper, bubble);
   dom.messages.appendChild(wrapper);
-  scrollToBottom();
+  // A fresh message (user/system/new assistant bubble) is a deliberate new
+  // event — jump to it even if the user had scrolled up. Only live streaming
+  // updates respect the user's scroll position.
+  scrollToBottom(true);
 
   if (returnBubble) return bubble;
   return null;
@@ -1568,11 +1572,40 @@ function renderMarkdown(text) {
   return html;
 }
 
-function scrollToBottom() {
+// How close to the bottom edge counts as "at the latest message". Inside this
+// window, streaming auto-scroll keeps you pinned; outside it, we assume you've
+// scrolled up to read and leave your position alone, surfacing the jump button.
+const SCROLL_BOTTOM_SLACK = 80;
+
+function isNearBottom() {
+  const el = dom.messages.parentElement;
+  return el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_BOTTOM_SLACK;
+}
+
+// Show the floating "jump to latest" button only when the user has scrolled
+// up away from the newest message.
+function updateJumpToLatest() {
+  dom.btnJumpLatest.classList.toggle("hidden", isNearBottom());
+}
+
+function scrollToBottom(force = false) {
   requestAnimationFrame(() => {
-    dom.messages.parentElement.scrollTop = dom.messages.parentElement.scrollHeight;
+    const el = dom.messages.parentElement;
+    // Smart scroll: only follow new content if the user is already at the
+    // bottom. `force` (new user/system messages, jump button) always follows.
+    if (force || isNearBottom()) {
+      el.scrollTop = el.scrollHeight;
+    }
+    updateJumpToLatest();
   });
 }
+
+// Keep the jump button in sync as the user scrolls the transcript by hand
+// (streaming auto-scroll already calls updateJumpToLatest on each token).
+dom.messages.parentElement.addEventListener("scroll", updateJumpToLatest, { passive: true });
+
+// "Jump to latest" — scroll to the newest message and hide the button.
+dom.btnJumpLatest.addEventListener("click", () => scrollToBottom(true));
 
 // ---------------------------------------------------------------------------
 // Context window usage
@@ -2601,7 +2634,7 @@ async function updateContext(fileId, label) {
     const parts = [];
     if (updated.length) parts.push(`✅ ${prefix}refreshed ${updated.length} (${updated.map(u => u.name).join(", ")})`);
     if (unchanged.length) parts.push(`ℹ️ ${unchanged.length} unchanged — cache kept`);
-    if (failed.length) parts.push(`⚠️ ${failed.length} failed (${failed.map(f => f.name).join(", ")})`);
+    if (failed.length) parts.push(`⚠️ ${failed.length} failed (${failed.map(f => f.error ? `${f.name}: ${f.error}` : f.name).join("; ")})`);
     if (!parts.length) parts.push("No kept documents to update");
     message = parts.join(" · ");
   } finally {
@@ -2827,6 +2860,10 @@ fixViewportHeight();
 window.addEventListener("resize", fixViewportHeight);
 
 async function init() {
+  // Sync the jump-to-latest button with the initial scroll position (in case
+  // a restored/overflowing transcript starts scrolled up).
+  updateJumpToLatest();
+
   // Wire up every copy button on the page (first-run banner has two command
   // rows; the Drive setup banner has one). Each button copies its sibling
   // <code class="cmd-text"> and flashes ✓ briefly.
