@@ -663,7 +663,7 @@ _FOCUS_TRIGGERS = [
 ]
 
 
-async def _download_and_parse_file(file_id: str, file_name: str, figure_ocr: bool = True, force: bool = False) -> str | None:
+async def _download_and_parse_file(file_id: str, file_name: str, figure_ocr: bool = True, force: bool = False, err_out: list[str] | None = None) -> str | None:
     """Download and parse a project file from Drive. Returns parsed text or None.
 
     ``figure_ocr`` (default True) is forwarded to parse_pdf / parse_docx —
@@ -674,6 +674,10 @@ async def _download_and_parse_file(file_id: str, file_name: str, figure_ocr: boo
     ``force`` (default False) bypasses the cache and re-downloads from Drive —
     used by the update-context endpoint so an "update" actually picks up Drive
     edits instead of returning the same cached bytes forever.
+
+    ``err_out`` (optional) receives a human-readable reason when this returns
+    ``None`` (exception message, unknown format, or no text extracted) — the
+    failure is otherwise only logged, which callers can't surface to the user.
     """
     global _focused_file_cache
     cache_key = (file_id, figure_ocr)
@@ -735,16 +739,22 @@ async def _download_and_parse_file(file_id: str, file_name: str, figure_ocr: boo
             parsed_text = doc.full_text
         else:
             logger.warning("Focus file: unknown format for '%s' (%s)", file_name, mime)
+            if err_out is not None:
+                err_out.append(f"unknown Drive format ({mime})")
             return None
 
         # Cache for subsequent messages
         if parsed_text:
             _focused_file_cache[cache_key] = parsed_text
             logger.info("Focus file: parsed and cached '%s' (%d chars, figure_ocr=%s)", file_name, len(parsed_text), figure_ocr)
+        elif err_out is not None:
+            err_out.append("no text extracted from file")
         return parsed_text
 
     except Exception as exc:
         logger.error("Focus file: failed to parse '%s': %s", file_name, exc)
+        if err_out is not None:
+            err_out.append(str(exc))
         return None
 
 
@@ -3917,18 +3927,20 @@ async def update_context(file_id: str = None):
         for doc in targets:
             name = doc["name"]
             old_text = doc["text"]
+            err_out: list[str] = []
             try:
                 # force=True re-downloads from Drive; the parse re-caches the
                 # fresh text so future one-shot scans see it too.
                 fresh = await _download_and_parse_file(
-                    doc["file_id"], name, figure_ocr=True, force=True
+                    doc["file_id"], name, figure_ocr=True, force=True,
+                    err_out=err_out,
                 )
             except Exception as exc:
                 logger.warning("Update-context: '%s' failed: %s", name, exc)
                 failed.append({"name": name, "error": str(exc)})
                 continue
             if not fresh:
-                failed.append({"name": name, "error": "download or parse failed"})
+                failed.append({"name": name, "error": (err_out[0] if err_out else "download or parse failed")})
                 continue
             if fresh == old_text:
                 unchanged.append(name)
