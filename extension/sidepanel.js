@@ -52,6 +52,7 @@ let generating = false; // true while an LLM response is streaming — locks inp
 let contextUpdating = false; // true while a blocking context operation (Update / Scrape / Load project) is in flight — locks chat + context controls
 let healthFailCount = 0; // consecutive health check failures (prevents false disconnect flash)
 let bgPort = null; // Port to background service worker (keep-alive only)
+let sidePanelWindowId = null; // This panel's own browser window — tab queries target it, not the last-focused window
 let thinkingMode = "auto"; // "auto" | "on" | "off" — DeepSeek v4 chain-of-thought
 let currentProvider = null; // last known provider/model — sent with the thinking toggle
 let currentModel = null; //  so /chat/configure keeps the runtime overrides intact
@@ -2517,7 +2518,7 @@ function updateTabBar(tab) {
 async function detectCurrentTab(retries = 3) {
   for (let i = 0; i <= retries; i++) {
     try {
-      const response = await chrome.runtime.sendMessage({ type: "getCurrentTab" });
+      const response = await chrome.runtime.sendMessage({ type: "getCurrentTab", windowId: sidePanelWindowId });
 
       if (response && response.ok) {
         updateTabBar({ title: response.title, url: response.url, id: response.id });
@@ -2737,7 +2738,14 @@ function initTabBar() {
         // Host access for all sites is declared as a REQUIRED permission
         // in the manifest (<all_urls>), granted at install time — no
         // runtime permission prompt is needed here.
-        const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+        // Target THIS panel's window, not whichever window was focused last —
+        // otherwise a tab torn out into a second window (and focused there)
+        // would be scraped instead of the tab this panel is actually attached to.
+        const [tab] = await chrome.tabs.query(
+          sidePanelWindowId
+            ? { active: true, windowId: sidePanelWindowId }
+            : { active: true, lastFocusedWindow: true }
+        );
         if (!tab || !tab.id) throw new Error("No active tab found");
 
         // Local PDF opened as file:// — Chrome's PDF viewer renders it through
@@ -2864,6 +2872,15 @@ async function init() {
   // a restored/overflowing transcript starts scrolled up).
   updateJumpToLatest();
 
+  // Determine this panel's own window up front — the tab bar and the scrape
+  // button must target THIS window, not whichever window was focused last
+  // (e.g. a tab the user tore out into a second window).
+  try {
+    sidePanelWindowId = (await chrome.windows.getCurrent()).id;
+  } catch (e) {
+    sidePanelWindowId = null; // fall back to last-focused-window behavior
+  }
+
   // Wire up every copy button on the page (first-run banner has two command
   // rows; the Drive setup banner has one). Each button copies its sibling
   // <code class="cmd-text"> and flashes ✓ briefly.
@@ -2908,6 +2925,11 @@ async function init() {
   let bgReconnectTimer = null;
   function connectBgPort() {
     bgPort = chrome.runtime.connect({ name: "sidepanel" });
+    // Tell the worker which window this panel belongs to, so its proactive
+    // tab pushes target THIS window rather than the last-focused one.
+    if (sidePanelWindowId != null) {
+      try { bgPort.postMessage({ type: "setWindow", windowId: sidePanelWindowId }); } catch (e) { /* will retry via ping */ }
+    }
     bgPort.onMessage.addListener((msg) => {
       if (msg.type === "activeTabChanged" && msg.tab) {
         updateTabBar(msg.tab);
@@ -2936,7 +2958,7 @@ async function init() {
       try { connectBgPort(); } catch (e) { /* will retry next tick */ }
       return;
     }
-    try { bgPort.postMessage({ type: "ping" }); } catch (e) {
+    try { bgPort.postMessage({ type: "ping", windowId: sidePanelWindowId }); } catch (e) {
       // Port died between ticks — force a reconnect.
       bgPort = null;
     }
