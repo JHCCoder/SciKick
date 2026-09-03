@@ -40,6 +40,9 @@ Whether you're preparing a new manuscript or responding to peer review, SciKick 
 - **Provider-keyed model dropdown** — pick your provider first, then choose from a curated dropdown of that provider's models in ⚙ Settings (with a free-text override for custom or local runtimes)
 - **Cloud or local LLMs** — use a hosted provider (Claude, GPT, Gemini, DeepSeek, GLM, Kimi, Grok, MiniMax, Qwen), any OpenAI-compatible endpoint, or run a model on your own machine via Ollama, LM Studio, or MLX — fully private, no API key needed for local
 - **Streaming responses** — real-time AI chat with streaming
+- **Conversation search** — search your full chat history and jump to matching messages inline
+- **Pin messages** — right-click any message to pin it to a top panel for quick reference while you keep asking questions
+- **Backend version check** — the panel nudges you to update your local server when it falls behind the installed extension
 - **Dark and light themes**
 - **Runs entirely locally** — no third-party servers, no data collection
 
@@ -303,7 +306,7 @@ This adds PyMuPDF + RapidOCR + ONNX Runtime (~150 MB). Then reload your project.
 
 ## Importing Web Articles
 
-Need to reason over a paper that isn't in your Drive folder? When you're viewing a journal article (or any web page) in your browser, the **Load this folder** button in the tab bar turns into **Scrape this page** — click it to import the article's text into the conversation.
+Need to reason over a paper that isn't in your Drive folder? When you're viewing a journal article (or any web page) in your browser, the **Load this folder** button in the tab bar turns into **Scrape this page** — click it to import the article's text into the conversation. Scrape works on HTML pages and PDFs alike — including local `file://` PDFs open in a tab — with the server fetching or reading the content for you.
 
 Scraped articles accumulate for the session (you can import several) and are kept separate from your Drive project files. They appear under **Scraped Articles** in the ℹ Info panel, where you can delete individual ones. Combine them with your project: "compare this article's methods to my manuscript's Methods section."
 

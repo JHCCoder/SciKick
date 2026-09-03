@@ -46,8 +46,10 @@ SciKick connects to local language models or cloud providers through your own AP
 ## Why researchers choose SciKick
 
 * Context-aware conversations across your entire research project
+* Search across your full conversation history with inline results
+* Pin important messages to a top panel for quick reference
 * Support for manuscripts, supplemental files, reviewer comments, figures, and research documents
-* Import selected online research articles for additional context
+* Import selected online research articles—including PDFs—for additional context
 * Intelligent revision planning and manuscript improvement
 * Recommendations for what to add and where to add it
 * Persistent project memory through **.scikick_memory.json**
