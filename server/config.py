@@ -97,7 +97,7 @@ PROVIDER_DEFAULTS = {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
     },
     "kimi": {
-        "model": "kimi-k2.5",
+        "model": "kimi-k2.6",
         "base_url": "https://api.moonshot.ai/v1",
     },
     "grok": {
@@ -109,7 +109,7 @@ PROVIDER_DEFAULTS = {
         "base_url": "https://api.minimax.io/v1",
     },
     "qwen": {
-        "model": "qwen-plus",
+        "model": "qwen3-max",
         "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
     },
     "custom": {

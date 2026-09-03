@@ -57,7 +57,7 @@ Whether you're preparing a new manuscript or responding to peer review, SciKick 
 ### Limitations
 
 - **Figure text is extracted, but not pure visuals** — In Auto/Deep mode, SciKick runs OCR on each embedded figure image and recovers the *text* inside it (axis labels, legend text, labels on a diagram, text in a screenshot). The AI can discuss figures using their captions, surrounding text, and that OCR'd figure text. It cannot, however, "see" purely visual content — exact data-point values read off a curve, microscopy detail, color/shape relationships. For that, paste a screenshot into the chat.
-- **Visual analysis workaround** — you can paste screenshots of figures directly into the chat for true visual analysis. This works with multi-modal LLMs like **Claude** (Sonnet 5, Opus 5, Fable 5) and **GPT-5**.
+- **Visual analysis workaround** — you can paste screenshots of figures directly into the chat for true visual analysis. This works with multi-modal LLMs like **Claude** (Sonnet 5, Opus 5, Fable 5.1) and **GPT-5**.
 - **Scanned PDFs need the optional OCR tier** — the base install reads only the native text layer, so scanned/image-only PDFs come back empty until you run `./start.sh --ocr` (see [Notes on extraction](#notes-on-extraction)).
 - **Future plans** — Deep PDF parsing (layout, reading order, tables, formulas, figure–caption association via Docling) is on the roadmap.
 
@@ -186,10 +186,10 @@ You're in control of the AI model you use. SciKick connects to local language mo
 | **Zhipu AI (GLM)** | [open.bigmodel.cn](https://open.bigmodel.cn/) | `glm-5` |
 | **OpenAI (GPT-5)** | [platform.openai.com](https://platform.openai.com/) | `gpt-5` |
 | **Google (Gemini)** | [aistudio.google.com](https://aistudio.google.com/) (free tier available) | `gemini-3.5-flash` |
-| **Moonshot AI (Kimi)** | [platform.moonshot.cn](https://platform.moonshot.cn/) | `kimi-k2.5` |
+| **Moonshot AI (Kimi)** | [platform.moonshot.cn](https://platform.moonshot.cn/) | `kimi-k2.6` |
 | **xAI (Grok)** | [console.x.ai](https://console.x.ai/) | `grok-4.5` |
 | **MiniMax** | [platform.minimaxi.com](https://platform.minimaxi.com/) | `MiniMax-M2.5` |
-| **Alibaba (Qwen)** | [bailian.console.aliyun.com](https://bailian.console.aliyun.com/) | `qwen-plus` |
+| **Alibaba (Qwen)** | [bailian.console.aliyun.com](https://bailian.console.aliyun.com/) | `qwen3-max` |
 | **Local — Ollama** | [ollama.com](https://ollama.com/) (install) | `llama3.1` |
 | **Local — LM Studio** | [lmstudio.ai](https://lmstudio.ai/) (install) | (whatever model is loaded in the GUI) |
 | **Local — MLX Server** | [github.com/ml-explore/mlx-examples](https://github.com/ml-explore/mlx-examples) (install) | `mlx-community/Llama-3.1-8B-Instruct-4bit` |
