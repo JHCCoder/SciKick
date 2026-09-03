@@ -287,15 +287,20 @@ def test_sync_openai_compatible_sends_off_param(monkeypatch):
 def test_capability_map_buckets_models():
     """Always-on / never-off models aren't toggle-capable; reasoning models are.
 
-    Gemini is excluded entirely — its OpenAI-compat endpoint rejects the
-    thinkingBudget field, so thinking can't be toggled per-request.
+    Gemini is excluded entirely — its OpenAI-compat endpoint accepts
+    reasoning_effort now, but 2.5-Pro and 3.x can't disable reasoning (no
+    working "off"), so thinking can't be toggled per-request via the toggle.
     """
-    for model in ("gpt-4.1", "gpt-4o", "glm-4-long", "kimi-k3", "kimi-k2.7-code",
-                  "gemini-3.5-flash", "gemini-2.5-pro", "gemini-2.5-flash",
-                  "MiniMax-M2.5", "grok-4.5", "grok-4.20", "claude-fable-5", "gpt-5"):
+    for model in ("gpt-4.1", "gpt-4o", "glm-5.3", "kimi-k3", "kimi-k2.7-code",
+                  "kimi-k2.7-code-highspeed", "gemini-3.5-flash", "gemini-2.5-pro",
+                  "gemini-2.5-flash", "gemini-3.8-flash", "MiniMax-M2.5",
+                  "MiniMax-M2.7-highspeed", "MiniMax-M2", "grok-4.5",
+                  "grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning",
+                  "claude-fable-5-1", "gpt-5"):
         assert not chat_handler._thinking_capable(model), model
-    for model in ("deepseek-v4-pro", "qwen3.5-plus", "glm-4.7", "kimi-k2.6",
-                  "gpt-5.2", "MiniMax-M3", "grok-4.3"):
+    for model in ("deepseek-v4-pro", "qwen3.5-plus", "qwen3.8-max", "qwen3.8-flash",
+                  "glm-4.7", "kimi-k2.6", "gpt-5.2", "gpt-5.6-sol", "gpt-5.6-luna",
+                  "MiniMax-M3", "grok-4.3"):
         assert chat_handler._thinking_capable(model), model
 
 

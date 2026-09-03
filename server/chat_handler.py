@@ -2326,15 +2326,15 @@ def _build_user_message(
 
 # Known valid models per provider — used to give helpful suggestions on 404 / invalid-model errors.
 _PROVIDER_MODELS: dict[str, str] = {
-    "anthropic":  "claude-opus-5, claude-sonnet-5, claude-haiku-4-5, claude-fable-5",
+    "anthropic":  "claude-opus-5, claude-sonnet-5, claude-haiku-4-5, claude-fable-5-1",
     "deepseek":   "deepseek-v4-pro, deepseek-v4-flash",
-    "glm":        "glm-5.2, glm-5, glm-5.1, glm-4.7, glm-4.6, glm-4-long, glm-4.5-air",
-    "openai":     "gpt-5, gpt-5.1, gpt-5.2, gpt-5.3, gpt-5.4, gpt-4.1, gpt-4o",
-    "gemini":     "gemini-3.5-flash, gemini-3-pro, gemini-3.1-pro, gemini-2.5-flash, gemini-2.5-pro",
-    "kimi":       "kimi-k3, kimi-k2.7-code, kimi-k2.6, kimi-k2.5",
-    "grok":       "grok-4.6, grok-4.5, grok-4.3, grok-4.20, grok-4.1-fast",
-    "minimax":    "MiniMax-M3, MiniMax-M2.7, MiniMax-M2.5, MiniMax-M2.1",
-    "qwen":       "qwen3.7-max, qwen3.7-plus, qwen3.7-flash, qwen3.6-plus, qwen3.6-flash, qwen3.5-plus, qwen3.5-flash, qwen3-max",
+    "glm":        "glm-5.3, glm-5.3-flash, glm-5.2, glm-5, glm-5.1, glm-4.7, glm-4.7-flash, glm-4.6, glm-4.5-air",
+    "openai":     "gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5, gpt-5.1, gpt-5.2, gpt-5.3, gpt-5.4, gpt-4.1, gpt-4o",
+    "gemini":     "gemini-3.8-flash, gemini-3.7-flash, gemini-3.6-flash, gemini-3.5-flash, gemini-3.1-pro-preview, gemini-2.5-pro, gemini-2.5-flash",
+    "kimi":       "kimi-k3, kimi-k2.7-code, kimi-k2.7-code-highspeed, kimi-k2.6",
+    "grok":       "grok-4.6, grok-4.5, grok-4.3, grok-4.20-0309-reasoning, grok-4.20-0309-non-reasoning",
+    "minimax":    "MiniMax-M3, MiniMax-M2.7, MiniMax-M2.7-highspeed, MiniMax-M2.5, MiniMax-M2.5-highspeed, MiniMax-M2.1, MiniMax-M2.1-highspeed, MiniMax-M2",
+    "qwen":       "qwen3.8-max, qwen3.8-flash, qwen3.7-max, qwen3.7-plus, qwen3.7-flash, qwen3.6-plus, qwen3.6-flash, qwen3.5-plus, qwen3.5-flash, qwen3-max",
     # Local runtimes — model names depend on what the user has loaded.
     "local-ollama":   "llama3.1, qwen2.5, deepseek-r1 (whatever you `ollama pull`ed)",
     "local-lmstudio": "whatever model is loaded in the LM Studio GUI",
@@ -2449,23 +2449,27 @@ _MODEL_THINKING_FAMILY: dict[str, str] = {
     "qwen3-max": "qwen", "qwen3.5-plus": "qwen", "qwen3.5-flash": "qwen",
     "qwen3.6-plus": "qwen", "qwen3.6-flash": "qwen",
     "qwen3.7-max": "qwen", "qwen3.7-plus": "qwen", "qwen3.7-flash": "qwen",
-    # glm — glm-4-long is never-off, excluded
+    "qwen3.8-max": "qwen", "qwen3.8-flash": "qwen",
+    # glm — 5.3/5.3-flash are always-on (forced, can't disable); 4.7-flash has
+    # no thinking toggle. All three excluded (like the retired glm-4-long).
     "glm-5.2": "glm", "glm-5": "glm", "glm-5.1": "glm", "glm-4.7": "glm", "glm-4.6": "glm",
     "glm-4.5-air": "glm",
-    # kimi — k3/k2.7-code can't toggle, excluded
-    "kimi-k2.5": "kimi", "kimi-k2.6": "kimi",
-    # openai — gpt-5 (minimal only) and gpt-4.x excluded; gpt-5.3 pending verify.
-    # gpt-5.x omitting reasoning_effort defaults to NO reasoning (like qwen), so
-    # the family has an explicit "on" shape (medium) — see _THINKING_PARAMS.
+    # kimi — k3/k2.7-code/k2.7-code-highspeed can't toggle (always-on), excluded
+    "kimi-k2.6": "kimi",
+    # openai — gpt-5 (minimal only), gpt-5.3 (snapshot shut down 2026-08-10),
+    # and gpt-4.x excluded. gpt-5.x omitting reasoning_effort defaults to NO
+    # reasoning (like qwen), so the family has an explicit "on" shape (medium).
     "gpt-5.1": "openai", "gpt-5.2": "openai", "gpt-5.4": "openai",
-    # minimax — only M3; M2.x always think
+    "gpt-5.6-sol": "openai", "gpt-5.6-terra": "openai", "gpt-5.6-luna": "openai",
+    # minimax — only M3; M2.x (incl. highspeed/M2) always think
     "MiniMax-M3": "minimax",
-    # grok — only 4.3; 4.5/4.6 always-on, 4.20/4.1-fast are separate model IDs
+    # grok — only 4.3; 4.5/4.6 always-on, 4.20 reasoning/non-reasoning are
+    # separate model IDs (reasoning baked in, not reasoning_effort-toggleable)
     "grok-4.3": "grok",
-    # NOTE: Gemini (2.5-flash etc.) is deliberately NOT here — its OpenAI-
-    # compatible endpoint REJECTS the thinkingBudget field ("Unknown name
-    # thinkingBudget"), so we can't toggle its thinking per-request. It keeps
-    # its native always-on behavior; the Auto/On/Off buttons hide for it.
+    # NOTE: Gemini is deliberately NOT here. Its OpenAI-compat endpoint now
+    # accepts reasoning_effort (minimal/low/medium/high), but 2.5-Pro and all
+    # 3.x models cannot disable reasoning (reasoning_effort:"none" rejected),
+    # so there is no working "off" — the Auto/On/Off buttons hide for it.
 }
 
 # Family -> how to toggle thinking. "off" is the disable shape; an optional
@@ -3393,23 +3397,28 @@ async def pdf_capabilities():
 
 # Approximate context window sizes per model (in tokens)
 MODEL_CONTEXT_WINDOWS = {
-    # anthropic — Opus/Sonnet/Fable 5: 1M; Haiku 4.5: 200K
+    # anthropic — Opus/Sonnet/Fable 5.1: 1M; Haiku 4.5: 200K
     "claude-opus-5": 1048576,
     "claude-sonnet-5": 1048576,
     "claude-haiku-4-5": 200000,
-    "claude-fable-5": 1048576,
-    # deepseek — v4 family: 1M
+    "claude-fable-5-1": 1048576,
+    # deepseek — v4 family: 1M (unverifiable from public docs; left at 1M)
     "deepseek-v4-pro": 1048576,
     "deepseek-v4-flash": 1048576,
-    # glm — GLM-5.2: 1M; GLM-5/5.1/4.7/4.6: 200K; 4-Long: 1M; 4.5-Air: 128K
+    # glm — 5.3/5.3-flash/5.2: 1M; 5/5.1/4.7/4.7-flash: 200K; 4.5-air: 128K
+    "glm-5.3": 1048576,
+    "glm-5.3-flash": 1048576,
     "glm-5.2": 1048576,
     "glm-5": 200000,
     "glm-5.1": 200000,
     "glm-4.7": 200000,
+    "glm-4.7-flash": 200000,
     "glm-4.6": 200000,
-    "glm-4-long": 1048576,
     "glm-4.5-air": 131072,
-    # openai — GPT-5.4: 1M; GPT-5/5.1/5.2/5.3: 400K; 4.1: 1M; 4o: 128K
+    # openai — gpt-5.6: ~1.05M; gpt-5/5.1/5.2/5.3: 400K; 5.4/4.1: 1M; 4o: 128K
+    "gpt-5.6-sol": 1050000,
+    "gpt-5.6-terra": 1050000,
+    "gpt-5.6-luna": 1050000,
     "gpt-5": 400000,
     "gpt-5.1": 400000,
     "gpt-5.2": 400000,
@@ -3417,29 +3426,35 @@ MODEL_CONTEXT_WINDOWS = {
     "gpt-5.4": 1048576,
     "gpt-4.1": 1048576,
     "gpt-4o": 128000,
-    # gemini — 3.x and 2.5: 1M
+    # gemini — 3.x and 2.5: 1M (exact per docs)
+    "gemini-3.8-flash": 1048576,
+    "gemini-3.7-flash": 1048576,
+    "gemini-3.6-flash": 1048576,
     "gemini-3.5-flash": 1048576,
-    "gemini-3-pro": 1048576,
-    "gemini-3.1-pro": 1048576,
+    "gemini-3.1-pro-preview": 1048576,
     "gemini-2.5-flash": 1048576,
     "gemini-2.5-pro": 1048576,
-    # kimi — K3: 1M; K2.5/2.6/2.7: 256K
-    "kimi-k3": 1048576,
-    "kimi-k2.7-code": 262144,
-    "kimi-k2.6": 262144,
-    "kimi-k2.5": 262144,
-    # grok — 4.6/4.5: 500K; 4.3: 1M; 4.20/4.1-fast: 2M
+    # kimi — K3: 1M; k2.7-code/k2.7-code-highspeed/k2.6: 256K (decimal per docs)
+    "kimi-k3": 1000000,
+    "kimi-k2.7-code": 256000,
+    "kimi-k2.7-code-highspeed": 256000,
+    "kimi-k2.6": 256000,
+    # grok — 4.6/4.5: 500K; 4.3: 1M; 4.20 variants: 1M
     "grok-4.6": 524288,
     "grok-4.5": 524288,
     "grok-4.3": 1048576,
-    "grok-4.20": 2097152,
-    "grok-4.1-fast": 2097152,
-    # minimax — M3: 1M; M2.x: 204,800
-    "MiniMax-M3": 1048576,
+    "grok-4.20-0309-reasoning": 1048576,
+    "grok-4.20-0309-non-reasoning": 1048576,
+    # minimax — M3: 1M (decimal per docs); M2.x (incl highspeed/M2): 204,800
+    "MiniMax-M3": 1000000,
     "MiniMax-M2.7": 204800,
+    "MiniMax-M2.7-highspeed": 204800,
     "MiniMax-M2.5": 204800,
+    "MiniMax-M2.5-highspeed": 204800,
     "MiniMax-M2.1": 204800,
-    # qwen — qwen3-max: 256K; 3.5/3.6/3.7 plus/flash/max: 1M
+    "MiniMax-M2.1-highspeed": 204800,
+    "MiniMax-M2": 204800,
+    # qwen — qwen3-max: 256K; 3.5/3.6/3.7/3.8 plus/flash/max: 1M
     "qwen3-max": 262144,
     "qwen3.5-plus": 1048576,
     "qwen3.5-flash": 1048576,
@@ -3448,6 +3463,8 @@ MODEL_CONTEXT_WINDOWS = {
     "qwen3.7-max": 1048576,
     "qwen3.7-plus": 1048576,
     "qwen3.7-flash": 1048576,
+    "qwen3.8-max": 1048576,
+    "qwen3.8-flash": 1048576,
 }
 
 
@@ -3458,13 +3475,36 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+def _lookup_context_window(model: str) -> int:
+    """Context window (tokens) for a model id, tolerating date/version suffixes.
+
+    Exact match first; then the longest table key the id starts with on a ``-``
+    or ``.`` boundary — so ``deepseek-v4-flash-0731`` resolves to the
+    ``deepseek-v4-flash`` window and ``gpt-5.1-2025-xx`` to ``gpt-5.1``. Truly
+    unknown ids fall back to 131072 (128K, conservative — the meter over-reports
+    rather than under-selling how tight the window is) and the miss is logged.
+    """
+    if not model:
+        return 131072
+    if model in MODEL_CONTEXT_WINDOWS:
+        return MODEL_CONTEXT_WINDOWS[model]
+    best = None
+    for key in MODEL_CONTEXT_WINDOWS:
+        if model.startswith(key + "-") or model.startswith(key + "."):
+            if best is None or len(key) > len(best):
+                best = key
+    if best:
+        return MODEL_CONTEXT_WINDOWS[best]
+    logger.info("Context window unknown for model %r; meter falls back to 128K", model)
+    return 131072
+
+
 def _get_context_window_size() -> tuple[int, str]:
     """Return the context window size for the current model."""
     try:
         cfg = get_llm_config()
         model = cfg.get("model", "")
-        size = MODEL_CONTEXT_WINDOWS.get(model, 131072)
-        return size, model
+        return _lookup_context_window(model), model
     except Exception:
         return 131072, "unknown"
 
