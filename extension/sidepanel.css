@@ -1011,13 +1011,17 @@ body {
 #chat-container {
   flex: 1 1 0;
   min-height: 0;
-  overflow-y: auto;
-  padding: 12px;
-  position: relative; /* anchor for the floating "jump to latest" button */
+  position: relative; /* containing block for the floating "jump to latest" button — this wrapper does NOT scroll, so the button stays pinned to the viewport */
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
-/* Floating "jump to latest" button — shown only when the user has scrolled
-   up away from the newest message (so auto-scroll doesn't fight them). */
+/* Floating "jump to latest" button — pinned to the lower-right of the chat
+   viewport. Its containing block is #chat-container (not the #messages
+   scroller), so it never scrolls with the messages. Shown only when the user
+   has scrolled up away from the newest message (so auto-scroll doesn't fight
+   them). */
 #btn-jump-latest {
   position: absolute;
   bottom: 16px;
@@ -1039,7 +1043,10 @@ body {
 #btn-jump-latest.hidden { display: none; }
 
 #messages {
+  flex: 1 1 0;
   min-height: 0;
+  overflow-y: auto; /* the chat's scroll container — separate from #chat-container so the jump-to-latest button (its sibling) stays pinned instead of scrolling away */
+  padding: 12px;
   display: flex;
   flex-direction: column;
   gap: 12px;

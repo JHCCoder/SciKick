@@ -1579,7 +1579,7 @@ function renderMarkdown(text) {
 const SCROLL_BOTTOM_SLACK = 80;
 
 function isNearBottom() {
-  const el = dom.messages.parentElement;
+  const el = dom.messages;
   return el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_BOTTOM_SLACK;
 }
 
@@ -1591,7 +1591,7 @@ function updateJumpToLatest() {
 
 function scrollToBottom(force = false) {
   requestAnimationFrame(() => {
-    const el = dom.messages.parentElement;
+    const el = dom.messages;
     // Smart scroll: only follow new content if the user is already at the
     // bottom. `force` (new user/system messages, jump button) always follows.
     if (force || isNearBottom()) {
@@ -1603,7 +1603,7 @@ function scrollToBottom(force = false) {
 
 // Keep the jump button in sync as the user scrolls the transcript by hand
 // (streaming auto-scroll already calls updateJumpToLatest on each token).
-dom.messages.parentElement.addEventListener("scroll", updateJumpToLatest, { passive: true });
+dom.messages.addEventListener("scroll", updateJumpToLatest, { passive: true });
 
 // "Jump to latest" — scroll to the newest message and hide the button.
 dom.btnJumpLatest.addEventListener("click", () => scrollToBottom(true));
