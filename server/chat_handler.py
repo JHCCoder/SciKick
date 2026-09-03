@@ -2329,7 +2329,7 @@ _PROVIDER_MODELS: dict[str, str] = {
     "anthropic":  "claude-opus-5, claude-sonnet-5, claude-haiku-4-5, claude-fable-5-1",
     "deepseek":   "deepseek-v4-pro, deepseek-v4-flash",
     "glm":        "glm-5.3, glm-5.3-flash, glm-5.2, glm-5, glm-5.1, glm-4.7, glm-4.7-flash, glm-4.6, glm-4.5-air",
-    "openai":     "gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5, gpt-5.1, gpt-5.2, gpt-5.3, gpt-5.4, gpt-4.1, gpt-4o",
+    "openai":     "gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna, gpt-5, gpt-5.1, gpt-5.2, gpt-5.4, gpt-4.1, gpt-4o",
     "gemini":     "gemini-3.8-flash, gemini-3.7-flash, gemini-3.6-flash, gemini-3.5-flash, gemini-3.1-pro-preview, gemini-2.5-pro, gemini-2.5-flash",
     "kimi":       "kimi-k3, kimi-k2.7-code, kimi-k2.7-code-highspeed, kimi-k2.6",
     "grok":       "grok-4.6, grok-4.5, grok-4.3, grok-4.20-0309-reasoning, grok-4.20-0309-non-reasoning",
@@ -2456,7 +2456,7 @@ _MODEL_THINKING_FAMILY: dict[str, str] = {
     "glm-4.5-air": "glm",
     # kimi — k3/k2.7-code/k2.7-code-highspeed can't toggle (always-on), excluded
     "kimi-k2.6": "kimi",
-    # openai — gpt-5 (minimal only), gpt-5.3 (snapshot shut down 2026-08-10),
+    # openai — gpt-5 (minimal only), gpt-5.3 (deprecated/superseded, dropped),
     # and gpt-4.x excluded. gpt-5.x omitting reasoning_effort defaults to NO
     # reasoning (like qwen), so the family has an explicit "on" shape (medium).
     "gpt-5.1": "openai", "gpt-5.2": "openai", "gpt-5.4": "openai",
@@ -3422,7 +3422,6 @@ MODEL_CONTEXT_WINDOWS = {
     "gpt-5": 400000,
     "gpt-5.1": 400000,
     "gpt-5.2": 400000,
-    "gpt-5.3": 400000,
     "gpt-5.4": 1048576,
     "gpt-4.1": 1048576,
     "gpt-4o": 128000,
