@@ -41,7 +41,7 @@ Need additional context? SciKick can import selected research articles from the 
 
 You're in control of the AI model you use.
 
-SciKick connects to local language models or cloud providers through your own API credentials, including Anthropic Claude, OpenAI GPT, Google Gemini, DeepSeek, Zhipu GLM, Moonshot Kimi, xAI Grok, MiniMax, Alibaba Qwen, and any OpenAI-compatible API. Choose the model that best fits your workflow, privacy requirements, and budget. A smart **thinking toggle** (Auto / On / Off) gives you control over deep reasoning on thinking-capable models — DeepSeek, Qwen, GLM, Kimi, GPT-5.x, MiniMax, and Grok — so you can favor depth on hard analytical questions and speed on routine ones.
+SciKick connects to local language models or cloud providers through your own API credentials — bring your own key and choose the model that best fits your workflow, privacy requirements, and budget. It works with major AI providers and any OpenAI-compatible endpoint, or you can run a model entirely on your own machine for fully private, no-cost use. A smart **thinking toggle** (Auto / On / Off) gives you control over deep reasoning on supported reasoning-capable models, so you can favor depth on hard analytical questions and speed on routine ones.
 
 ## Why researchers choose SciKick
 
@@ -54,11 +54,11 @@ SciKick connects to local language models or cloud providers through your own AP
 * Recommendations for what to add and where to add it
 * Persistent project memory through **.scikick_memory.json**
 * Continue your work seamlessly across sessions and computers
-* Support for 10+ cloud and local AI providers, from Claude and GPT to DeepSeek, Gemini, GLM, Kimi, Grok, MiniMax, and Qwen
+* Support for major cloud and local AI providers — bring your own API key, or run a model locally for fully private, no-cost use
 * Bring your own API key—no required subscriptions or vendor lock-in
 * One-click refresh of kept documents from Google Drive as you edit them
 * Automatic prefix caching—repeat turns on supported providers are faster and cheaper
-* Smart thinking control (Auto / On / Off) on DeepSeek and other thinking-capable models
+* Smart thinking control (Auto / On / Off) on supported reasoning-capable models
 * Provider-keyed model dropdown for quick, guided setup
 * Dark and light themes
 * No third-party servers required for your research workflow

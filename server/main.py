@@ -77,7 +77,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="scikick",
     description="AI research companion for brainstorming, writing, and analysis with Google Drive sync",
-    version="0.3.0",
+    version="0.3.1",
     lifespan=lifespan,
 )
 
